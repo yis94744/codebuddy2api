@@ -1,8 +1,9 @@
 # -*- coding: utf-8 -*-
-"""CodeBuddy CN 桌面端账号导入器。
+"""CodeBuddy CN 桌面端账号读取器。
 
-用户点击「添加账号」→ 本模块打开 CodeBuddy CN 登录 → 用户完成登录后，
-自动从 CodeBuddy CN 的 state.vscdb 解密新凭据，生成 .info 文件并加入账号池。
+本模块负责从 CodeBuddy CN 桌面端当前登录态中解密凭据：
+  - 读取 state.vscdb 里加密的 access token，解密出 account/auth 信息；
+  - 供 converter 的后台自动同步线程调用：新登录账号自动导入、切换登录自动同步。
 
 凭据存储位置：
   DB   : %APPDATA%\\CodeBuddy CN\\User\\globalStorage\\state.vscdb
@@ -16,12 +17,8 @@ import base64
 import json
 import os
 import sqlite3
-import subprocess
-import time
 from pathlib import Path
 from typing import Optional
-
-import httpx
 
 import converter  # 复用 CredentialManager 的 header 构造等
 
@@ -41,25 +38,6 @@ def cn_vscdb() -> Optional[Path]:
 def cn_local_state() -> Optional[Path]:
     p = cn_appdata() / "Local State"
     return p if p.exists() else None
-
-
-def find_cn_exe() -> Optional[str]:
-    """定位 CodeBuddy CN 桌面端可执行文件。"""
-    candidates = [
-        os.environ.get("CODEBUDDY_CN_EXE", ""),
-        r"E:\CodeBuddy CN\CodeBuddy CN.exe",
-        str(Path.home() / "AppData" / "Local" / "Programs" / "CodeBuddy CN" / "CodeBuddy CN.exe"),
-        str(Path.home() / "AppData" / "Local" / "Programs" / "CodeBuddy" / "CodeBuddy.exe"),
-        r"C:\Program Files\CodeBuddy CN\CodeBuddy CN.exe",
-    ]
-    for c in candidates:
-        if c and os.path.exists(c):
-            return c
-    # 开始菜单快捷方式兜底
-    menu = Path(os.environ.get("APPDATA", "")) / "Microsoft" / "Windows" / "Start Menu" / "Programs"
-    for lnk in menu.rglob("*CodeBuddy*.lnk"):
-        return str(lnk)
-    return None
 
 
 # ---------------------------------------------------------------------------
@@ -223,43 +201,6 @@ def _extract_account(secret: dict) -> Optional[dict]:
     if not account.get("uid") or not auth.get("accessToken"):
         return None
     return {"account": account, "auth": auth}
-
-
-def open_cn_login() -> str:
-    """打开 CodeBuddy CN 桌面端（若未运行）。"""
-    exe = find_cn_exe()
-    if not exe:
-        return "未找到 CodeBuddy CN 安装，请手动打开桌面端登录"
-    try:
-        subprocess.Popen([exe], close_fds=True)
-        return "已打开 CodeBuddy CN，请完成登录"
-    except Exception as e:
-        return f"打开 CodeBuddy CN 失败: {e}"
-
-
-def detect_new_accounts(pool) -> dict:
-    """检测 CodeBuddy CN 中是否有当前账号池里不存在的账号。
-
-    返回 {found: bool, info: 解密后的 secret 或 None, reason: str}
-    """
-    secret = _read_cn_secret()
-    if secret is None:
-        return {"found": False, "info": None, "reason": "未检测到 CodeBuddy CN 凭据（可能未登录或读取失败）"}
-    extracted = _extract_account(secret)
-    if extracted is None:
-        return {"found": False, "info": None, "reason": "凭据格式异常"}
-    uid = (extracted["account"] or {}).get("uid")
-    # 与现有账号池比对
-    if pool is not None:
-        for acct in pool.accounts.values():
-            try:
-                s = acct.credential.summary()
-                if s.get("uid") == uid:
-                    return {"found": False, "info": None,
-                            "reason": f"账号已存在（uid {uid}）"}
-            except Exception:
-                continue
-    return {"found": True, "info": secret, "reason": "发现新账号"}
 
 
 def import_account_from_secret(secret: dict, pool, name: Optional[str] = None) -> dict:

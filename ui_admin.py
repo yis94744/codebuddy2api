@@ -468,52 +468,6 @@ def billing_refresh(authorization: Optional[str] = Header(default=None),
     return {"ok": True, "message": "余额刷新已触发"}
 
 
-# -- CodeBuddy CN 一键添加账号 ----------------------------------------------
-
-@router.post("/accounts/cn/open")
-def cn_open_login(authorization: Optional[str] = Header(default=None),
-                  x_api_key: Optional[str] = Header(default=None, alias="X-Api-Key")):
-    """打开 CodeBuddy CN 桌面端登录界面。"""
-    _check_admin_auth(authorization, x_api_key)
-    try:
-        from cn_importer import open_cn_login
-        message = open_cn_login()
-        return {"ok": True, "message": message}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail={"error": {"message": str(e)}})
-
-
-@router.get("/accounts/cn/detect")
-def cn_detect(authorization: Optional[str] = Header(default=None),
-              x_api_key: Optional[str] = Header(default=None, alias="X-Api-Key")):
-    """检测 CodeBuddy CN 中是否有未导入的新账号。"""
-    _check_admin_auth(authorization, x_api_key)
-    try:
-        from cn_importer import detect_new_accounts
-        result = detect_new_accounts(_get_pool())
-        return result
-    except Exception as e:
-        raise HTTPException(status_code=500, detail={"error": {"message": str(e)}})
-
-
-@router.post("/accounts/cn/import")
-def cn_import(authorization: Optional[str] = Header(default=None),
-              x_api_key: Optional[str] = Header(default=None, alias="X-Api-Key")):
-    """把 CodeBuddy CN 当前凭据导入账号池（仅当是新账号时）。"""
-    _check_admin_auth(authorization, x_api_key)
-    try:
-        from cn_importer import detect_new_accounts, import_account_from_secret
-        result = detect_new_accounts(_get_pool())
-        if not result.get("found"):
-            return {"ok": False, "message": result.get("reason", "未发现新账号")}
-        imported = import_account_from_secret(result["info"], _get_pool())
-        LOG_BUS.emit(f"一键导入账号 -> {imported['account']['name']}", level="info")
-        return {"ok": True, "message": f"已导入账号：{imported['account']['name']}",
-                "imported": imported}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail={"error": {"message": str(e)}})
-
-
 # ---------------------------------------------------------------------------
 # 挂载到 FastAPI app
 # ---------------------------------------------------------------------------

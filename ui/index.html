@@ -152,7 +152,6 @@ body{background:var(--bg);color:var(--text);font-family:"Segoe UI","PingFang SC"
             <el-option label="轮询(auto)" value="auto"></el-option>
           </el-select>
           <el-button type="primary" plain size="small" @click="loadAccounts()">刷新</el-button>
-          <el-button type="primary" size="small" @click="cnOpenDialog">添加账号</el-button>
         </div>
       </div>
       <div class="panel">
@@ -218,7 +217,7 @@ body{background:var(--bg);color:var(--text);font-family:"Segoe UI","PingFang SC"
             </template>
           </el-table-column>
         </el-table>
-        <div v-if="!accounts.length" class="empty">未发现账号。可点击右上角"添加账号"登录 CodeBuddy 后自动导入</div>
+        <div v-if="!accounts.length" class="empty">未发现账号。请在 CodeBuddy/WorkBuddy 桌面端登录，服务会自动读取当前登录账号并导入</div>
         <div class="hint" style="margin-top:12px">搜索目录：{{pool.search_dirs.join('；')}}</div>
       </div>
     </div>
@@ -302,40 +301,6 @@ body{background:var(--bg);color:var(--text);font-family:"Segoe UI","PingFang SC"
     </div>
   </main>
 
-  <!-- 添加账号对话框（一键引导） -->
-  <el-dialog v-model="importOpen" title="添加账号" width="520px">
-    <template v-if="!cnPolling">
-      <div style="background:var(--bg-soft);border-radius:10px;padding:14px;margin-bottom:14px">
-        <div style="font-weight:600;margin-bottom:8px">📱 方式一：CodeBuddy 桌面端登录（推荐）</div>
-        <div class="hint" style="margin-bottom:10px">
-          点击下方按钮打开 CodeBuddy CN 登录界面 → 完成登录后回到本页，系统会自动检测并导入新账号。
-        </div>
-        <el-button type="primary" @click="cnOpen">打开 CodeBuddy 登录</el-button>
-        <el-button plain :loading="cnPolling" @click="cnPoll">检测新账号</el-button>
-      </div>
-      <div style="background:var(--bg-soft);border-radius:10px;padding:14px">
-        <div style="font-weight:600;margin-bottom:8px">📄 方式二：手动指定凭据文件</div>
-        <el-form label-width="80px">
-          <el-form-item label="文件路径"><el-input v-model="importPath" placeholder="如 C:\Users\xx\...\auth\workbuddy-desktop.info"></el-input></el-form-item>
-          <el-form-item label="显示名称"><el-input v-model="importName" placeholder="留空自动取文件名"></el-input></el-form-item>
-        </el-form>
-        <el-button type="primary" plain @click="doImport">导入</el-button>
-      </div>
-    </template>
-    <template v-else>
-      <div style="text-align:center;padding:18px 0">
-        <div style="width:36px;height:36px;border:3px solid #4f6ef7;border-top-color:transparent;border-radius:50%;display:inline-block;animation:spin 0.8s linear infinite"></div>
-        <style>@keyframes spin{to{transform:rotate(360deg)}}</style>
-        <div style="margin-top:12px;font-weight:600">正在等待 CodeBuddy 登录…</div>
-        <div class="hint" style="margin-top:6px">请在 CodeBuddy 窗口完成登录，本页会自动检测新账号（每 3 秒检查一次）</div>
-        <div class="hint" style="margin-top:10px;color:var(--warn)">{{cnPollMsg}}</div>
-        <div style="margin-top:16px">
-          <el-button size="small" @click="cnCancel">停止等待</el-button>
-        </div>
-      </div>
-    </template>
-  </el-dialog>
-
   <!-- 账号详情对话框 -->
   <el-dialog v-model="detailOpen" title="账号详情" width="560px">
     <div v-if="detail" class="json-pre">{{JSON.stringify(detail,null,2)}}</div>
@@ -375,7 +340,6 @@ const app=createApp({
     const wizard=reactive({codex:'',cc:'',openai:'',cmd:''});
 
     // 对话框
-    const importOpen=ref(false);const importPath=ref('');const importName=ref('');
     const detailOpen=ref(false);const detail=ref(null);
     const checkingId=ref('');
     const checkinId=ref('');
@@ -447,29 +411,7 @@ const app=createApp({
       }catch(e){ElementPlus.ElMessage.error(e.message);}finally{checkinId.value='';}
     }
     function viewAcct(row){detail.value=row;detailOpen.value=true;}
-    async function doImport(){
-      try{await api('/api/accounts/import',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({path:importPath.value,name:importName.value})});
-        ElementPlus.ElMessage.success('导入成功');importOpen.value=false;importPath.value='';importName.value='';loadAccounts();}
-      catch(e){ElementPlus.ElMessage.error(e.message);}
-    }
-    // -- CodeBuddy CN 一键添加账号 --------------------------------------
-    const cnPolling=ref(false);const cnPollMsg=ref('');let cnTimer=null;
-    function cnOpenDialog(){importOpen.value=true;}
-    function cnCancel(){cnPolling.value=false;if(cnTimer){clearInterval(cnTimer);cnTimer=null;}}
-    async function cnOpen(){
-      try{const r=await api('/api/accounts/cn/open',{method:'POST'});
-        ElementPlus.ElMessage.success(r.message||'已打开 CodeBuddy');cnPolling.value=true;cnPollMsg.value='等待登录中…';startCnPoll();}
-      catch(e){ElementPlus.ElMessage.error(e.message);}
-    }
-    async function cnPoll(){
-      try{const r=await api('/api/accounts/cn/detect');
-        if(r.found){cnCancel();cnPollMsg.value='检测到新账号，正在导入…';const imp=await api('/api/accounts/cn/import',{method:'POST'});
-          if(imp.ok){ElementPlus.ElMessage.success(imp.message);importOpen.value=false;loadAccounts();loadDashboard();}
-          else ElementPlus.ElMessage.warning(imp.message||'导入未完成');}
-        else cnPollMsg.value=r.reason||'未检测到新账号';}
-      catch(e){cnPollMsg.value='检测失败：'+e.message;}
-    }
-    function startCnPoll(){if(cnTimer)clearInterval(cnTimer);cnTimer=setInterval(cnPoll,3000);}
+    // -- CodeBuddy CN 登录态自动同步（后端后台线程处理，前端无需干预）--
     async function setStrategy(v){
       try{await api('/api/accounts/strategy',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({strategy:v})});
         ElementPlus.ElMessage.success('路由策略：'+strategyLabel(v)+'（积分耗尽时自动切换其他账号顶上）');}catch(e){ElementPlus.ElMessage.error(e.message);}
@@ -572,10 +514,9 @@ const app=createApp({
     onMounted(()=>{loadDashboard();});
     return {page,status,pool,stats,accounts,activeAcct,apiKeyHint,checkErr,
       logs,logLevel,logQuery,filteredLogs,wsConnected,logBox,onLogScroll,toggleLogs,clearLogs,
-      cfg,loadDashboard,loadAccounts,loadConfig,saveConfig,switchAcct,checkAcct,viewAcct,doImport,setStrategy,
+      cfg,loadDashboard,loadAccounts,loadConfig,saveConfig,switchAcct,checkAcct,viewAcct,setStrategy,
       markExhausted,recoverAcct,healthMeta,strategyLabel,
-      importOpen,importPath,importName,detailOpen,detail,checkingId,checkinId,checkinAcct,
-      cnOpenDialog,cnOpen,cnPoll,cnCancel,cnPolling,cnPollMsg,
+      detailOpen,detail,checkingId,checkinId,checkinAcct,
       wizard,loadWizard,copy,var_ok,
       fmtUptime,fmtExpire,expireSoon,fmtCredit,connectLogs};
   }

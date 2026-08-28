@@ -1307,6 +1307,13 @@ def start(host="127.0.0.1", port=8787, api_key="", strategy="failover",
     except Exception as e:
         sys.stderr.write(f"[警告] 签到调度器初始化失败：{e}\n")
 
+    # 启动 CodeBuddy CN 登录态自动同步：直接读取当前登录账号，切换时自动导入口+刷积分
+    try:
+        _cn_sync_stop.clear()
+        threading.Thread(target=_cn_autosync_loop, daemon=True, name="cn-autosync").start()
+    except Exception as e:
+        sys.stderr.write(f"[警告] CN 自动同步线程启动失败：{e}\n")
+
     cfg = uvicorn.Config(app, host=host, port=port, log_level="warning")
     _server = uvicorn.Server(cfg)
     # 若不在主线程（如桌面启动器调用），需手动建 event loop
@@ -1323,6 +1330,7 @@ def start(host="127.0.0.1", port=8787, api_key="", strategy="failover",
 def stop():
     """优雅停止服务（供桌面启动器调用）。"""
     global _server, _checkin_scheduler
+    _cn_sync_stop.set()
     if _checkin_scheduler is not None:
         try:
             _checkin_scheduler.stop()
@@ -1342,6 +1350,96 @@ def _refresh_all_balances():
             acct.refresh_real_credit()
         except Exception:
             pass
+
+
+# ---------------------------------------------------------------------------
+# CodeBuddy CN 登录态自动同步：
+#   直接读取 CodeBuddy CN 桌面端当前登录的账号（state.vscdb 解密），
+#   新账号自动导入口；用户切换登录时自动切换主力账号并刷新积分余额。
+# ---------------------------------------------------------------------------
+
+_cn_sync_stop = threading.Event()
+
+
+def _cn_pool_account_by_uid(pool, uid: str):
+    """在账号池中按 uid 查找账号（找不到返回 None）。"""
+    for a in list(pool.accounts.values()):
+        try:
+            if (a.credential.summary() or {}).get("uid") == uid:
+                return a
+        except Exception:
+            continue
+    return None
+
+
+def _cn_sync_uid(uid: str) -> Optional[str]:
+    """把 CodeBuddy CN 当前登录账号（uid）同步到账号池（幂等）。
+
+    新账号：解密凭据 → 写 .info → 加入账号池 → 设为主力 → 刷新积分余额；
+    已有账号：把主力切换过去并刷新积分余额。
+    返回动作描述（无动作返回 None）。
+    """
+    pool = CONFIG.get("pool")
+    if pool is None:
+        return None
+    found = _cn_pool_account_by_uid(pool, uid)
+    if found is None:
+        from cn_importer import _read_cn_secret, import_account_from_secret
+        secret = _read_cn_secret()
+        if not secret:
+            return None
+        imported = import_account_from_secret(secret, pool)
+        acct_id = (imported.get("account") or {}).get("id")
+        if acct_id:
+            try:
+                pool.switch(acct_id)
+            except Exception:
+                pool.active_id = acct_id
+        acct = pool.accounts.get(acct_id)
+        if acct is not None:
+            try:
+                acct.refresh_real_credit()
+            except Exception:
+                pass
+        return f"自动导入 CodeBuddy CN 当前登录账号「{imported['account']['name']}」并设为主力"
+    if found.id != pool.active_id:
+        try:
+            pool.switch(found.id)
+        except Exception:
+            pass
+        try:
+            found.refresh_real_credit()
+        except Exception:
+            pass
+        return f"检测到 CodeBuddy CN 登录切换 →「{found.name}」，积分池已同步"
+    return None
+
+
+def _cn_autosync_loop():
+    """后台线程：定期读取 CodeBuddy CN 当前登录账号。
+
+    _read_cn_secret 带文件签名缓存（vscdb/Local State 未变化时零开销），
+    因此可以低频安全轮询。仅在登录账号变化时执行导入/切换动作。
+    """
+    from cn_importer import _read_cn_secret, _extract_account
+    last_uid: Optional[str] = None
+    while not _cn_sync_stop.is_set():
+        uid = None
+        try:
+            ex = _extract_account(_read_cn_secret() or {})
+            uid = (ex.get("account") or {}).get("uid") if ex else None
+        except Exception:
+            uid = None
+        if uid != last_uid:
+            last_uid = uid
+            if uid:
+                try:
+                    action = _cn_sync_uid(uid)
+                    if action:
+                        _log(f"[CN自动同步] {action}")
+                except Exception as e:
+                    _log(f"[CN自动同步] 同步失败：{_truncate(str(e), 120)}")
+        _cn_sync_stop.wait(10)
 
 
 def run_checkin_once(force: bool = True) -> dict:

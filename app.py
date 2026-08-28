@@ -152,20 +152,15 @@ class App:
             btns, text="管理面板", command=self._open_ui,
             corner_radius=8, font=ctk.CTkFont(size=12))
         self.btn_ui.grid(row=0, column=1, sticky="ew", padx=4, pady=(0, 4))
-        self.btn_add = ctk.CTkButton(
-            btns, text="添加账号", command=self._add_account,
-            fg_color="#2d3a5f", hover_color="#3a4a7a", corner_radius=8,
-            font=ctk.CTkFont(size=12))
-        self.btn_add.grid(row=0, column=2, sticky="ew", padx=4, pady=(0, 4))
         self.btn_copy = ctk.CTkButton(
             btns, text="复制配置", command=self._copy,
             corner_radius=8, font=ctk.CTkFont(size=12))
-        self.btn_copy.grid(row=1, column=0, sticky="ew", padx=(0, 4))
+        self.btn_copy.grid(row=0, column=2, sticky="ew", padx=(4, 0), pady=(0, 4))
         self.btn_checkin = ctk.CTkButton(
             btns, text="🎁 立即签到", command=self._checkin_now,
             fg_color="#3a6f3a", hover_color="#2d5a2d", corner_radius=8,
             font=ctk.CTkFont(size=12))
-        self.btn_checkin.grid(row=1, column=1, columnspan=2, sticky="ew", padx=4)
+        self.btn_checkin.grid(row=1, column=0, columnspan=3, sticky="ew", padx=0)
 
     # -- 服务生命周期（进程内启动，适配 PyInstaller 打包） ----------
     def _start_service(self):
@@ -213,49 +208,6 @@ class App:
                % (self.base, self.key))
         self.root.clipboard_clear()
         self.root.clipboard_append(txt)
-
-    def _add_account(self):
-        """一键添加账号：打开 CodeBuddy CN 登录，后台轮询检测并自动导入。"""
-        import tkinter.messagebox as mb
-        try:
-            _get("/api/status", self.base, self.key)  # 确保服务在线
-        except Exception:
-            mb.showinfo("添加账号", "服务未运行，请先启动服务")
-            return
-        req = urllib.request.Request(
-            self.base + "/api/accounts/cn/open", data=b"{}",
-            headers={"Authorization": "Bearer " + self.key,
-                     "Content-Type": "application/json"}, method="POST")
-        try:
-            with urllib.request.urlopen(req, timeout=8) as resp:
-                r = json.loads(resp.read().decode("utf-8", "replace"))
-        except Exception as e:
-            mb.showerror("添加账号", f"打开 CodeBuddy 失败：{e}")
-            return
-        mb.showinfo("添加账号", (r.get("message") or "已打开 CodeBuddy CN") +
-                    "\n\n请在 CodeBuddy 窗口完成登录。\n登录成功后本窗口会自动检测并导入新账号（每 3 秒检查一次，最多 3 分钟）。")
-        self.btn_add.configure(state="disabled", text="等待登录中…")
-        threading.Thread(target=self._cn_wait, daemon=True).start()
-
-    def _cn_wait(self):
-        """后台轮询检测新账号，发现后自动导入并提示。"""
-        import tkinter.messagebox as mb
-        deadline = time.time() + 180
-        while not self.stop_evt.is_set() and time.time() < deadline:
-            try:
-                d = _get("/api/accounts/cn/detect", self.base, self.key)
-                if d.get("found"):
-                    imp = _get("/api/accounts/cn/import", self.base, self.key)
-                    msg = (imp.get("message") or "导入完成") if imp.get("ok") \
-                        else (imp.get("message") or "导入失败")
-                    self.q.put(("addresult", ("添加账号", msg)))
-                    return
-            except Exception:
-                pass
-            time.sleep(3)
-        self.q.put(("addresult", ("添加账号",
-                                  "等待超时（3 分钟），未检测到新账号。"
-                                  "可在管理面板 → 添加账号 里重试。")))
 
     def _checkin_now(self):
         """手动立即签到：调用后端 /api/billing/checkin（后台线程，不卡 UI）。"""
@@ -326,7 +278,6 @@ class App:
             self._render_state(item[1])
         elif kind == "addresult":
             import tkinter.messagebox as mb
-            self.btn_add.configure(state="normal", text="添加账号")
             self.btn_checkin.configure(state="normal", text="🎁 立即签到")
             title, body = item[1]
             mb.showinfo(title, body)
