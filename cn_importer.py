@@ -63,27 +63,46 @@ def find_cn_exe() -> Optional[str]:
 
 
 # ---------------------------------------------------------------------------
-# DPAPI 解密（通过 PowerShell 的 ProtectedData，规避 ctypes 堆损坏问题）
+# DPAPI 解密（ctypes 直调 CryptUnprotectData，无子进程，无窗口闪烁）
 # ---------------------------------------------------------------------------
 
-def _dpapi_unprotect(b64_data: str) -> bytes:
-    """把 base64 的 DPAPI 密文交给 PowerShell 解密，返回明文。"""
-    import subprocess as sp
-    script = (
-        "[Console]::OutputEncoding=[Text.Encoding]::UTF8;"
-        "Add-Type -AssemblyName System.Security;"
-        "$d=[Convert]::FromBase64String('%s');"
-        "$u=[Security.Cryptography.ProtectedData]::Unprotect($d,$null,'CurrentUser');"
-        "[Convert]::ToBase64String($u)" % b64_data
-    )
-    r = sp.run(["powershell", "-NoProfile", "-Command", script],
-               capture_output=True, timeout=30)
-    if r.returncode != 0:
-        raise RuntimeError(f"DPAPI 解密失败: {r.stderr.decode('utf-8','replace')[:200]}")
-    out = r.stdout.decode("utf-8", "replace").strip().splitlines()
-    if not out:
-        raise RuntimeError("DPAPI 解密无输出")
-    return base64.b64decode(out[-1])
+def _dpapi_unprotect(data: bytes) -> bytes:
+    """用 ctypes 调用 Windows DPAPI 解密，返回明文。
+
+    替代之前 spawn powershell 的方案——轮询检测每 3 秒一次，
+    每次 spawn 都会弹出 pwsh 窗口。ctypes 直调零进程开销。
+    """
+    import ctypes
+    from ctypes import wintypes
+
+    class DATA_BLOB(ctypes.Structure):
+        _fields_ = [("cbData", wintypes.DWORD),
+                    ("pbData", ctypes.POINTER(ctypes.c_ubyte))]
+
+    buf = (ctypes.c_ubyte * len(data)).from_buffer_copy(data)
+    blob_in = DATA_BLOB(len(data), buf)
+    blob_out = DATA_BLOB()
+
+    crypt32 = ctypes.windll.crypt32
+    crypt32.CryptUnprotectData.restype = wintypes.BOOL
+    crypt32.CryptUnprotectData.argtypes = [
+        ctypes.POINTER(DATA_BLOB),        # pDataIn
+        ctypes.POINTER(wintypes.LPWSTR),  # ppszDataDescr
+        ctypes.POINTER(DATA_BLOB),        # pOptionalEntropy
+        ctypes.c_void_p,                  # pvReserved
+        ctypes.c_void_p,                  # pPromptStruct
+        wintypes.DWORD,                   # dwFlags
+        ctypes.POINTER(DATA_BLOB),        # pDataOut
+    ]
+    ok = crypt32.CryptUnprotectData(ctypes.byref(blob_in), None, None,
+                                    None, None, 0, ctypes.byref(blob_out))
+    if not ok:
+        raise ctypes.WinError(ctypes.get_last_error())
+    try:
+        return ctypes.string_at(blob_out.pbData, blob_out.cbData)
+    finally:
+        if blob_out.pbData:
+            ctypes.windll.kernel32.LocalFree(blob_out.pbData)
 
 
 def _decrypt_secret(encrypted: bytes, aes_key: bytes) -> bytes:
@@ -100,28 +119,51 @@ def _decrypt_secret(encrypted: bytes, aes_key: bytes) -> bytes:
     return AESGCM(aes_key).decrypt(nonce, ct, None)
 
 
+# 缓存：DPAPI 主密钥只解一次；vscdb 未变化时直接返回缓存的解密结果
+_cached_aes_key: Optional[bytes] = None
+_cached_secret: Optional[dict] = None
+_cached_signature: Optional[tuple] = None
+
+
 def _read_cn_secret() -> Optional[dict]:
     """从 CodeBuddy CN 读取并解密 access token。
 
     返回解码后的 JSON（含 account/auth 信息）；失败返回 None。
+    带缓存：vscdb / Local State 文件未变化时直接复用上次结果，零开销。
     """
+    global _cached_aes_key, _cached_secret, _cached_signature
+
     db = cn_vscdb()
     ls = cn_local_state()
     if not db or not ls:
+        _cached_secret = None
         return None
-    # 1) 取 DPAPI 加密的 AES 主密钥
     try:
-        with open(ls, "r", encoding="utf-8") as f:
-            state = json.load(f)
-        ek = (state.get("os_crypt") or {}).get("encrypted_key", "")
-        if not ek:
-            return None
-        raw = base64.b64decode(ek)
-        if raw[:5] != b"DPAPI":
-            return None
-        aes_key = _dpapi_unprotect(base64.b64encode(raw[5:]).decode())
-    except Exception:
+        db_stat = db.stat()
+        ls_stat = ls.stat()
+    except OSError:
         return None
+    signature = (db_stat.st_mtime_ns, db_stat.st_size,
+                 ls_stat.st_mtime_ns, ls_stat.st_size)
+    # 文件未变化 → 返回缓存（含"解密失败/未登录"的 None 也缓存，避免重复开销）
+    if _cached_signature == signature:
+        return _cached_secret
+
+    # 1) 取 DPAPI 加密的 AES 主密钥（缓存，只解一次）
+    if _cached_aes_key is None:
+        try:
+            with open(ls, "r", encoding="utf-8") as f:
+                state = json.load(f)
+            ek = (state.get("os_crypt") or {}).get("encrypted_key", "")
+            if not ek:
+                return None
+            raw = base64.b64decode(ek)
+            if raw[:5] != b"DPAPI":
+                return None
+            _cached_aes_key = _dpapi_unprotect(raw[5:])
+        except Exception:
+            return None
+
     # 2) 读 vscdb 里的密文
     try:
         con = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
@@ -151,8 +193,10 @@ def _read_cn_secret() -> Optional[dict]:
         return None
     # 3) AES-GCM 解密
     try:
-        plain = _decrypt_secret(encrypted, aes_key)
-        return json.loads(plain.decode("utf-8", "replace"))
+        plain = _decrypt_secret(encrypted, _cached_aes_key)
+        _cached_secret = json.loads(plain.decode("utf-8", "replace"))
+        _cached_signature = signature
+        return _cached_secret
     except Exception:
         return None
 
