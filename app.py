@@ -147,20 +147,25 @@ class App:
             btns, text="停止服务", command=self._on_toggle,
             fg_color="#ff453a", hover_color="#cc3a30", corner_radius=8,
             font=ctk.CTkFont(size=12))
-        self.btn_toggle.grid(row=0, column=0, sticky="ew", padx=(0, 4))
+        self.btn_toggle.grid(row=0, column=0, sticky="ew", padx=(0, 4), pady=(0, 4))
         self.btn_ui = ctk.CTkButton(
             btns, text="管理面板", command=self._open_ui,
             corner_radius=8, font=ctk.CTkFont(size=12))
-        self.btn_ui.grid(row=0, column=1, sticky="ew", padx=4)
+        self.btn_ui.grid(row=0, column=1, sticky="ew", padx=4, pady=(0, 4))
         self.btn_add = ctk.CTkButton(
             btns, text="添加账号", command=self._add_account,
             fg_color="#2d3a5f", hover_color="#3a4a7a", corner_radius=8,
             font=ctk.CTkFont(size=12))
-        self.btn_add.grid(row=0, column=2, sticky="ew", padx=4)
+        self.btn_add.grid(row=0, column=2, sticky="ew", padx=4, pady=(0, 4))
         self.btn_copy = ctk.CTkButton(
             btns, text="复制配置", command=self._copy,
             corner_radius=8, font=ctk.CTkFont(size=12))
-        self.btn_copy.grid(row=0, column=3, sticky="ew", padx=(4, 0))
+        self.btn_copy.grid(row=1, column=0, sticky="ew", padx=(0, 4))
+        self.btn_checkin = ctk.CTkButton(
+            btns, text="🎁 立即签到", command=self._checkin_now,
+            fg_color="#3a6f3a", hover_color="#2d5a2d", corner_radius=8,
+            font=ctk.CTkFont(size=12))
+        self.btn_checkin.grid(row=1, column=1, columnspan=2, sticky="ew", padx=4)
 
     # -- 服务生命周期（进程内启动，适配 PyInstaller 打包） ----------
     def _start_service(self):
@@ -243,13 +248,44 @@ class App:
                     imp = _get("/api/accounts/cn/import", self.base, self.key)
                     msg = (imp.get("message") or "导入完成") if imp.get("ok") \
                         else (imp.get("message") or "导入失败")
-                    self.q.put(("addresult", msg))
+                    self.q.put(("addresult", ("添加账号", msg)))
                     return
             except Exception:
                 pass
             time.sleep(3)
-        self.q.put(("addresult", "等待超时（3 分钟），未检测到新账号。"
-                                   "可在管理面板 → 添加账号 里重试。"))
+        self.q.put(("addresult", ("添加账号",
+                                  "等待超时（3 分钟），未检测到新账号。"
+                                  "可在管理面板 → 添加账号 里重试。")))
+
+    def _checkin_now(self):
+        """手动立即签到：调用后端 /api/billing/checkin（后台线程，不卡 UI）。"""
+        self.btn_checkin.configure(state="disabled", text="签到中…")
+        threading.Thread(target=self._checkin_worker, daemon=True).start()
+
+    def _checkin_worker(self):
+        import tkinter.messagebox as mb
+        try:
+            req = urllib.request.Request(
+                self.base + "/api/billing/checkin", data=b"{}",
+                headers={"Authorization": "Bearer " + self.key,
+                         "Content-Type": "application/json"}, method="POST")
+            with urllib.request.urlopen(req, timeout=20) as resp:
+                r = json.loads(resp.read().decode("utf-8", "replace"))
+        except Exception as e:
+            self.q.put(("addresult", ("签到", "签到失败：%s" % e)))
+            return
+        lines = []
+        for x in (r.get("results") or []):
+            nm = x.get("nickname") or x.get("name", "?")
+            if x.get("already"):
+                lines.append("· %s：今日已签到" % nm)
+            elif x.get("checked"):
+                lines.append("· %s：+%s 积分（连签 %s 天）" % (
+                    nm, x.get("awarded", ""), x.get("streak", "")))
+            elif x.get("message"):
+                lines.append("· %s：%s" % (nm, x.get("message")))
+        msg = "\n".join(lines) or (r.get("message") or "签到完成")
+        self.q.put(("addresult", ("签到", "签到结果：\n" + msg)))
 
     # -- 轮询 ----------------------------------------------------------
     def _poll(self):
@@ -291,7 +327,9 @@ class App:
         elif kind == "addresult":
             import tkinter.messagebox as mb
             self.btn_add.configure(state="normal", text="添加账号")
-            mb.showinfo("添加账号", item[1])
+            self.btn_checkin.configure(state="normal", text="🎁 立即签到")
+            title, body = item[1]
+            mb.showinfo(title, body)
         elif kind == "wait":
             self.lbl_dot.configure(text_color="#ffd60a")
             self.lbl_state.configure(text="服务启动中…")
