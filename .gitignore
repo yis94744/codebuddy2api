@@ -1,4 +1,4 @@
-# Python
+# ---- Python ----
 __pycache__/
 *.py[cod]
 *$py.class
@@ -11,14 +11,44 @@ ENV/
 *.egg-info/
 .pytest_cache/
 .mypy_cache/
+.hypothesis/
 
-# 本地运行产物 / 日志
-*.log
-.DS_Store
-Thumbs.db
+# ---- IDE ----
+.idea/
+.vscode/
+*.swp
+*.swo
 
-# 个人 / 敏感信息（绝不提交）
+# ---- 敏感信息（绝不提交）----
+# CodeBuddy 账号凭据（含 accessToken / refreshToken）
+*.info
+# 本地运行配置（含 api_key）
+config.json
 *.token
 *.key
+*.pem
 secrets.*
+.env
+.env.*
 
+# ---- 打包产物 ----
+dist/
+build/
+*.spec
+*.manifest
+
+# ---- 日志 / 临时文件 / 诊断输出 ----
+*.log
+*.pid
+diag*.txt
+_diag*.txt
+_t*.txt
+_all_tests.txt
+temp_smoke*
+server*.txt
+nohup.out
+
+# ---- 系统 ----
+.DS_Store
+Thumbs.db
+desktop.ini

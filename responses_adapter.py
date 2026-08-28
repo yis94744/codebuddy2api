@@ -462,6 +462,8 @@ class ResponsesStreamConverter:
                 "output_tokens_details": {"reasoning_tokens": 0},
                 "total_tokens": u.get("total_tokens", 0),
             }
+            if u.get("credit") is not None:
+                usage["credit"] = u.get("credit")
 
         return {
             "id": self.resp_id,

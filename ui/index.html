@@ -1,0 +1,587 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>workbuddy2api 管理面板</title>
+<script src="/ui/vendor/vue.global.prod.js"></script>
+<script src="/ui/vendor/element-plus.full.min.js"></script>
+<script src="/ui/vendor/echarts.min.js"></script>
+<link rel="stylesheet" href="/ui/vendor/element-plus.css">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><rect width='100' height='100' rx='20' fill='%234f6ef7'/><text x='50' y='68' font-size='48' text-anchor='middle' fill='white'>w</text></svg>">
+<style>
+:root{
+  --bg:#0f1115; --bg-soft:#161a22; --panel:#1a1f2a; --border:#262d3d;
+  --text:#e6e9f0; --text-dim:#8b93a7; --accent:#4f6ef7; --ok:#3ecf8e; --warn:#f5a623; --err:#f56c6c;
+}
+*{box-sizing:border-box}
+html,body{margin:0;padding:0;height:100%}
+body{background:var(--bg);color:var(--text);font-family:"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif;font-size:14px}
+#app{display:flex;height:100vh;overflow:hidden}
+/* 侧边栏 */
+.sidebar{width:216px;background:var(--bg-soft);border-right:1px solid var(--border);display:flex;flex-direction:column;flex-shrink:0}
+.logo{display:flex;align-items:center;gap:10px;padding:18px 20px;border-bottom:1px solid var(--border)}
+.logo-badge{width:34px;height:34px;border-radius:9px;background:linear-gradient(135deg,#4f6ef7,#7c4df7);display:flex;align-items:center;justify-content:center;font-weight:700;font-size:18px;color:#fff;flex-shrink:0}
+.logo-txt b{display:block;font-size:14px;letter-spacing:.3px}
+.logo-txt span{font-size:11px;color:var(--text-dim)}
+.nav{flex:1;padding:12px 10px;overflow-y:auto}
+.nav-item{display:flex;align-items:center;gap:10px;padding:10px 14px;border-radius:8px;cursor:pointer;color:var(--text-dim);margin-bottom:2px;transition:.15s;user-select:none}
+.nav-item:hover{background:rgba(255,255,255,.05);color:var(--text)}
+.nav-item.active{background:rgba(79,110,247,.16);color:#8ea4ff;font-weight:600}
+.nav-item .icon{font-size:16px;width:20px;text-align:center}
+.footer{padding:14px 20px;border-top:1px solid var(--border);font-size:11px;color:var(--text-dim);line-height:1.7}
+.footer .dot{display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:6px}
+.dot.on{background:var(--ok)} .dot.off{background:var(--err)}
+/* 主内容 */
+.main{flex:1;overflow-y:auto;padding:22px 26px}
+.page-head{display:flex;align-items:center;justify-content:space-between;margin-bottom:18px}
+.page-head h2{margin:0;font-size:19px;font-weight:700}
+.page-head .sub{color:var(--text-dim);font-size:12px;margin-top:4px}
+/* 卡片 */
+.cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(215px,1fr));gap:14px;margin-bottom:18px}
+.card{background:var(--panel);border:1px solid var(--border);border-radius:12px;padding:16px 18px;position:relative;overflow:hidden}
+.card .k{font-size:12px;color:var(--text-dim);margin-bottom:8px}
+.card .v{font-size:24px;font-weight:700;font-variant-numeric:tabular-nums}
+.card .v.small{font-size:15px;font-weight:600;line-height:1.6;word-break:break-all}
+.card .hint{font-size:11px;color:var(--text-dim);margin-top:6px}
+.card .tag{position:absolute;top:14px;right:14px;font-size:11px;padding:2px 8px;border-radius:20px}
+/* 表格样式覆盖 */
+.el-table{--el-table-bg-color:transparent;--el-table-tr-bg-color:transparent;--el-table-header-bg-color:rgba(255,255,255,.03);--el-table-border-color:var(--border);--el-table-text-color:var(--text);--el-table-header-text-color:var(--text-dim);background:transparent}
+.el-table th.el-table__cell{font-weight:600}
+.el-card{--el-card-bg-color:var(--panel);--el-card-border-color:var(--border);border-radius:12px}
+.panel{background:var(--panel);border:1px solid var(--border);border-radius:12px;padding:18px}
+.status-pill{display:inline-flex;align-items:center;gap:6px;font-size:12px;padding:3px 10px;border-radius:20px;font-weight:500}
+.ok{background:rgba(62,207,142,.14);color:var(--ok)}
+.warn{background:rgba(245,166,35,.14);color:var(--warn)}
+.err{background:rgba(245,108,108,.14);color:var(--err)}
+.idle{background:rgba(139,147,167,.14);color:var(--text-dim)}
+.status-pill.exhausted{background:rgba(245,108,108,.2);color:#ff9b9b}
+.status-pill.cooldown{background:rgba(245,166,35,.18);color:#ffc069}
+/* 日志 */
+.log-box{background:#0c0e13;border:1px solid var(--border);border-radius:10px;height:calc(100vh - 240px);overflow-y:auto;padding:12px 14px;font-family:Consolas,Menlo,monospace;font-size:12px;line-height:1.9}
+.log-line{white-space:pre-wrap;word-break:break-all;border-bottom:1px dashed rgba(255,255,255,.03)}
+.log-line .t{color:#5a6273;margin-right:8px}
+.log-line.info{color:#c3c9d6}.log-line.warn{color:var(--warn)}.log-line.error{color:var(--err)}
+.log-line .hl{color:#8ea4ff}
+/* 趋势图 */
+#trend{height:230px;width:100%}
+.el-dialog{--el-dialog-bg-color:var(--panel);--el-dialog-border-radius:14px}
+.el-input__wrapper,.el-select__wrapper{background:rgba(255,255,255,.04);box-shadow:0 0 0 1px var(--border) inset}
+.el-form-item__label{color:var(--text-dim)}
+.json-pre{background:#0c0e13;border:1px solid var(--border);border-radius:8px;padding:12px;font-family:Consolas,monospace;font-size:12px;white-space:pre-wrap;word-break:break-all;max-height:320px;overflow:auto;color:#a5b4d8}
+.mono{font-family:Consolas,Menlo,monospace}
+::-webkit-scrollbar{width:8px;height:8px}
+::-webkit-scrollbar-thumb{background:#2a3245;border-radius:4px}
+::-webkit-scrollbar-track{background:transparent}
+.wizard-grid{display:grid;grid-template-columns:1fr 1fr;gap:16px}
+@media(max-width:960px){.wizard-grid{grid-template-columns:1fr}}
+.empty{padding:60px 0;text-align:center;color:var(--text-dim)}
+.banner-warn{background:rgba(245,166,35,.1);border:1px solid rgba(245,166,35,.3);color:var(--warn);border-radius:10px;padding:10px 14px;font-size:12px;margin-bottom:16px}
+</style>
+</head>
+<body>
+<div id="app">
+  <!-- 侧边栏 -->
+  <aside class="sidebar">
+    <div class="logo">
+      <div class="logo-badge">w</div>
+      <div class="logo-txt"><b>workbuddy2api</b><span>Web 管理面板</span></div>
+    </div>
+    <nav class="nav">
+      <div class="nav-item" :class="{active:page==='dashboard'}" @click="page='dashboard';loadDashboard()"><span class="icon">📊</span>仪表盘</div>
+      <div class="nav-item" :class="{active:page==='accounts'}" @click="page='accounts';loadAccounts()"><span class="icon">👤</span>账号管理</div>
+      <div class="nav-item" :class="{active:page==='logs'}" @click="page='logs';connectLogs()"><span class="icon">📜</span>实时日志</div>
+      <div class="nav-item" :class="{active:page==='settings'}" @click="page='settings';loadConfig()"><span class="icon">⚙️</span>设置</div>
+      <div class="nav-item" :class="{active:page==='wizard'}" @click="page='wizard';loadWizard()"><span class="icon">🔌</span>接入向导</div>
+    </nav>
+    <div class="footer">
+      <div><span class="dot" :class="(status.online&&!status.authFail)?'on':'off'"></span>{{status.online?(status.authFail?'API Key 未验证':'服务运行中'):'连接失败'}}</div>
+      <div>{{status.host||''}}</div>
+      <div style="margin-top:6px;opacity:.7">v1.0 · 仅供本地学习研究</div>
+    </div>
+  </aside>
+  <!-- 主内容 -->
+  <main class="main">
+    <div v-if="apiKeyHint" class="banner-warn">⚠️ 服务启用了 API Key 鉴权（{{apiKeyHint}}）。管理操作需要携带正确的 Key，请在页面右上角设置。</div>
+
+    <!-- ===== 仪表盘 ===== -->
+    <div v-show="page==='dashboard'">
+      <div class="page-head"><div><h2>仪表盘</h2><div class="sub">服务运行状态与用量概览</div></div>
+        <el-button type="primary" plain size="small" @click="loadDashboard()">刷新</el-button>
+      </div>
+      <div class="cards">
+        <div class="card"><div class="k">运行状态</div><div class="v" :style="{color:(status.online&&!status.authFail)?'var(--ok)':'var(--err)'}">{{status.online?(status.authFail?'未授权':'运行中'):'离线'}}</div><div class="hint">已运行 {{fmtUptime(status.uptime)}}</div></div>
+        <div class="card"><div class="k">今日请求</div><div class="v">{{stats.today_requests}}</div><div class="hint">平均耗时 {{stats.avg_duration}}s</div></div>
+        <div class="card"><div class="k">今日积分消耗</div><div class="v" :style="{color:stats.today_credit>0?'var(--warn)':'var(--text)'}">{{fmtCredit(stats.today_credit)}}</div><div class="hint">按上游回传 credit 聚合 · 24h 内</div></div>
+        <div class="card"><div class="k">可用账号</div><div class="v">{{pool.pool_stats?pool.pool_stats.ok:accounts.length}}<span style="font-size:14px;color:var(--text-dim)"> / {{accounts.length}}</span></div><div class="hint">策略 {{strategyLabel(pool.strategy)}} · 冷却中 {{pool.pool_stats?pool.pool_stats.cooldown:0}}</div></div>
+        <div class="card"><div class="k">审核拦截</div><div class="v" :style="{color:stats.content_filters>0?'var(--warn)':'var(--text)'}">{{stats.content_filters}}</div><div class="hint">警告 {{stats.warns}} · 错误 {{stats.errors}}</div></div>
+      </div>
+      <div class="panel" style="margin-bottom:16px">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">
+          <b style="font-size:14px">当前账号</b>
+          <span v-if="pool.accounts.length>1" class="status-pill idle" style="cursor:pointer" @click="page='accounts';loadAccounts()">点击切换 →</span>
+        </div>
+        <div v-if="activeAcct" style="display:flex;gap:28px;flex-wrap:wrap;align-items:center">
+          <div style="width:46px;height:46px;border-radius:50%;background:linear-gradient(135deg,#4f6ef7,#7c4df7);display:flex;align-items:center;justify-content:center;font-size:19px;font-weight:700">{{(activeAcct.nickname||'?').slice(0,1)}}</div>
+          <div><div style="font-size:16px;font-weight:700">{{activeAcct.name}}</div><div class="hint">昵称 {{activeAcct.nickname||'-'}} · {{activeAcct.uid||''}}</div></div>
+          <div><div class="k" style="font-size:11px;color:var(--text-dim)">Token 过期</div>
+            <span class="status-pill" :class="activeAcct.token_expired?'err':expireSoon(activeAcct)?'warn':'ok'">{{activeAcct.token_expired?'已过期':(expireSoon(activeAcct)?'即将过期':'有效')}}</span>
+            <div class="hint">{{fmtExpire(activeAcct.token_expires_at)}}</div>
+          </div>
+          <div><div class="k" style="font-size:11px;color:var(--text-dim)">健康状态</div>
+            <span class="status-pill" :class="healthMeta(activeAcct).cls">{{healthMeta(activeAcct).text}}</span>
+            <div class="hint" v-if="activeAcct.last_error" style="color:var(--warn);max-width:260px">{{activeAcct.last_error.slice(0,80)}}</div>
+          </div>
+          <div><div class="k" style="font-size:11px;color:var(--text-dim)">凭据文件</div><div class="v small mono" style="font-size:12px">{{activeAcct.file}}</div></div>
+        </div>
+        <div v-else class="empty">未找到任何账号凭据，请先在桌面端登录 CodeBuddy / WorkBuddy</div>
+      </div>
+      <div class="panel">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px"><b style="font-size:14px">近 30 条请求耗时趋势</b><span class="hint">来自日志总线</span></div>
+        <div id="trend"></div>
+      </div>
+    </div>
+
+    <!-- ===== 账号管理 ===== -->
+    <div v-show="page==='accounts'">
+      <div class="page-head"><div><h2>账号管理</h2><div class="sub">多账号池 · 一键切换 · 有效性检测</div></div>
+        <div style="display:flex;gap:10px">
+          <el-select v-model="pool.strategy" size="small" style="width:150px" @change="setStrategy">
+            <el-option label="自动顶上(failover)" value="failover"></el-option>
+            <el-option label="固定账号" value="fixed"></el-option>
+            <el-option label="轮询(auto)" value="auto"></el-option>
+          </el-select>
+          <el-button type="primary" plain size="small" @click="loadAccounts()">刷新</el-button>
+          <el-button type="primary" size="small" @click="cnOpenDialog">添加账号</el-button>
+        </div>
+      </div>
+      <div class="panel">
+        <el-table :data="accounts" style="width:100%">
+          <el-table-column label="账号" min-width="150">
+            <template #default="{row}">
+              <div style="display:flex;align-items:center;gap:10px">
+                <div style="width:32px;height:32px;border-radius:50%;background:linear-gradient(135deg,#4f6ef7,#7c4df7);display:flex;align-items:center;justify-content:center;font-size:13px;flex-shrink:0">{{(row.nickname||row.name).slice(0,1)}}</div>
+                <div><b>{{row.name}}</b><div class="hint">{{row.nickname||'-'}}</div></div>
+              </div>
+            </template>
+          </el-table-column>
+          <el-table-column label="状态" width="110">
+            <template #default="{row}">
+              <span class="status-pill" :class="healthMeta(row).cls">{{healthMeta(row).text}}</span>
+            </template>
+          </el-table-column>
+          <el-table-column label="积分" width="130">
+            <template #default="{row}">
+              <template v-if="row.real_credit!==null&&row.real_credit!==undefined">
+                <div><b style="color:var(--warn)">{{row.real_credit}}</b> <span class="hint">真实余额</span></div>
+              </template>
+              <template v-else-if="row.real_credit_note">
+                <div class="hint">{{row.real_credit_note}}</div>
+              </template>
+              <template v-else>
+                <div class="hint">累计 {{row.credit_spent||0}}</div>
+              </template>
+            </template>
+          </el-table-column>
+          <el-table-column label="Token 过期" width="150">
+            <template #default="{row}">
+              <span :style="{color:row.token_expired?'var(--err)':'var(--text)'}">{{fmtExpire(row.token_expires_at)}}</span>
+            </template>
+          </el-table-column>
+          <el-table-column label="凭据文件" min-width="200" show-overflow-tooltip>
+            <template #default="{row}"><span class="mono" style="color:var(--text-dim)">{{row.file}}</span></template>
+          </el-table-column>
+          <el-table-column label="失败/错误" min-width="170" show-overflow-tooltip>
+            <template #default="{row}">
+              <template v-if="row.last_error">
+                <div class="hint" style="color:var(--warn)">{{row.fail_count||1}} 次失败</div>
+                <div class="hint">{{row.last_error.slice(0,70)}}</div>
+              </template>
+              <span v-else class="hint">-</span>
+            </template>
+          </el-table-column>
+          <el-table-column label="当前" width="80">
+            <template #default="{row}"><el-tag v-if="pool.active_id===row.id" type="primary" size="small">在用</el-tag></template>
+          </el-table-column>
+          <el-table-column label="操作" width="330">
+            <template #default="{row}">
+              <el-button size="small" type="primary" plain :disabled="pool.active_id===row.id" @click="switchAcct(row.id)">切换</el-button>
+              <el-button size="small" plain :loading="checkingId===row.id" @click="checkAcct(row.id)">检测</el-button>
+              <el-button v-if="row.health==='ok'" size="small" plain type="warning" @click="markExhausted(row.id)">标记耗尽</el-button>
+              <el-button v-if="row.health==='exhausted'||row.health==='cooldown'" size="small" plain type="success" @click="recoverAcct(row.id)">恢复</el-button>
+              <el-button size="small" plain @click="viewAcct(row)">详情</el-button>
+            </template>
+          </el-table-column>
+          <el-table-column label="签到" width="90">
+            <template #default="{row}">
+              <el-button size="small" plain type="warning" :loading="checkinId===row.id" @click="checkinAcct(row)">签到</el-button>
+            </template>
+          </el-table-column>
+        </el-table>
+        <div v-if="!accounts.length" class="empty">未发现账号。可点击右上角"添加账号"登录 CodeBuddy 后自动导入</div>
+        <div class="hint" style="margin-top:12px">搜索目录：{{pool.search_dirs.join('；')}}</div>
+      </div>
+    </div>
+
+    <!-- ===== 实时日志 ===== -->
+    <div v-show="page==='logs'">
+      <div class="page-head"><div><h2>实时日志</h2><div class="sub">请求 / 响应 / 审核拦截实时推送</div></div>
+        <div style="display:flex;gap:8px;align-items:center">
+          <el-select v-model="logLevel" size="small" style="width:110px">
+            <el-option label="全部" value=""></el-option>
+            <el-option label="信息" value="info"></el-option>
+            <el-option label="积分" value="credit"></el-option>
+            <el-option label="警告" value="warn"></el-option>
+            <el-option label="错误" value="error"></el-option>
+          </el-select>
+          <el-input v-model="logQuery" size="small" placeholder="搜索 模型名 / 请求ID / 关键字" clearable style="width:230px"></el-input>
+          <el-button size="small" :type="wsConnected?'warning':'success'" @click="toggleLogs()">{{wsConnected?'暂停':'实时'}}</el-button>
+          <el-button size="small" plain @click="clearLogs()">清空</el-button>
+        </div>
+      </div>
+      <div class="log-box" ref="logBox" @scroll.passive="onLogScroll">
+        <div v-for="(l,i) in filteredLogs" :key="i" class="log-line" :class="l.level">
+          <span class="t">{{l.time}}</span>
+          <template v-if="l.model"><span class="hl">[{{l.model}}]</span> </template>
+          <template v-if="l.rid"><span class="hl">[{{l.rid}}]</span> </template>
+          {{l.msg}}
+        </div>
+        <div v-if="!filteredLogs.length" class="empty">暂无日志</div>
+      </div>
+    </div>
+
+    <!-- ===== 设置 ===== -->
+    <div v-show="page==='settings'">
+      <div class="page-head"><div><h2>设置</h2><div class="sub">配置热更新，无需重启</div></div>
+        <el-button type="primary" size="small" @click="saveConfig()">保存配置</el-button>
+      </div>
+      <div class="wizard-grid">
+        <div class="panel">
+          <b style="display:block;margin-bottom:14px">服务参数</b>
+          <el-form label-width="90px" label-position="left">
+            <el-form-item label="端口"><el-input v-model.number="cfg.port" size="small" disabled><template #append><span class="hint">重启生效</span></template></el-input></el-form-item>
+            <el-form-item label="API Key"><el-input v-model="cfg.api_key" size="small" placeholder="留空则不校验本地鉴权" show-password></el-input></el-form-item>
+            <el-form-item label="日志文件"><el-input v-model="cfg.log_path" size="small" placeholder="如 converter.log"></el-input></el-form-item>
+            <el-form-item label="脱敏"><el-switch v-model="cfg.desensitize" active-text="--desensitize"></el-switch></el-form-item>
+            <el-form-item label="保留全文"><el-switch v-model="cfg.no_compact" active-text="--no-compact" :disabled="!cfg.desensitize"></el-switch></el-form-item>
+          </el-form>
+        </div>
+        <div class="panel">
+          <b style="display:block;margin-bottom:14px">模型列表 <span class="hint">（/v1/models 返回，可增删改）</span></b>
+          <div v-for="(m,i) in cfg.models" :key="i" style="display:flex;gap:8px;margin-bottom:8px">
+            <el-input v-model="cfg.models[i]" size="small" class="mono"></el-input>
+            <el-button size="small" plain @click="cfg.models.splice(i,1)">✕</el-button>
+          </div>
+          <el-button size="small" plain @click="cfg.models.push('')">+ 添加模型</el-button>
+        </div>
+      </div>
+    </div>
+
+    <!-- ===== 接入向导 ===== -->
+    <div v-show="page==='wizard'">
+      <div class="page-head"><div><h2>接入向导</h2><div class="sub">一键复制客户端配置</div></div></div>
+      <div class="wizard-grid">
+        <div class="panel">
+          <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px"><b>Codex CLI (Responses)</b><el-button size="small" plain @click="copy(wizard.codex)">复制</el-button></div>
+          <pre class="json-pre">{{wizard.codex}}</pre>
+        </div>
+        <div class="panel">
+          <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px"><b>CC Switch / Claude Code (Anthropic)</b><el-button size="small" plain @click="copy(wizard.cc)">复制</el-button></div>
+          <pre class="json-pre">{{wizard.cc}}</pre>
+        </div>
+        <div class="panel">
+          <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px"><b>通用 OpenAI 兼容客户端</b><el-button size="small" plain @click="copy(wizard.openai)">复制</el-button></div>
+          <pre class="json-pre">{{wizard.openai}}</pre>
+        </div>
+        <div class="panel">
+          <b style="display:block;margin-bottom:10px">启动命令</b>
+          <pre class="json-pre">{{wizard.cmd}}</pre>
+          <div class="hint">本服务读取桌面端已登录凭据，仅作协议转发，请确保合法拥有订阅。勿暴露到公网。</div>
+        </div>
+      </div>
+    </div>
+  </main>
+
+  <!-- 添加账号对话框（一键引导） -->
+  <el-dialog v-model="importOpen" title="添加账号" width="520px">
+    <template v-if="!cnPolling">
+      <div style="background:var(--bg-soft);border-radius:10px;padding:14px;margin-bottom:14px">
+        <div style="font-weight:600;margin-bottom:8px">📱 方式一：CodeBuddy 桌面端登录（推荐）</div>
+        <div class="hint" style="margin-bottom:10px">
+          点击下方按钮打开 CodeBuddy CN 登录界面 → 完成登录后回到本页，系统会自动检测并导入新账号。
+        </div>
+        <el-button type="primary" @click="cnOpen">打开 CodeBuddy 登录</el-button>
+        <el-button plain :loading="cnPolling" @click="cnPoll">检测新账号</el-button>
+      </div>
+      <div style="background:var(--bg-soft);border-radius:10px;padding:14px">
+        <div style="font-weight:600;margin-bottom:8px">📄 方式二：手动指定凭据文件</div>
+        <el-form label-width="80px">
+          <el-form-item label="文件路径"><el-input v-model="importPath" placeholder="如 C:\Users\xx\...\auth\workbuddy-desktop.info"></el-input></el-form-item>
+          <el-form-item label="显示名称"><el-input v-model="importName" placeholder="留空自动取文件名"></el-input></el-form-item>
+        </el-form>
+        <el-button type="primary" plain @click="doImport">导入</el-button>
+      </div>
+    </template>
+    <template v-else>
+      <div style="text-align:center;padding:18px 0">
+        <div style="width:36px;height:36px;border:3px solid #4f6ef7;border-top-color:transparent;border-radius:50%;display:inline-block;animation:spin 0.8s linear infinite"></div>
+        <style>@keyframes spin{to{transform:rotate(360deg)}}</style>
+        <div style="margin-top:12px;font-weight:600">正在等待 CodeBuddy 登录…</div>
+        <div class="hint" style="margin-top:6px">请在 CodeBuddy 窗口完成登录，本页会自动检测新账号（每 3 秒检查一次）</div>
+        <div class="hint" style="margin-top:10px;color:var(--warn)">{{cnPollMsg}}</div>
+        <div style="margin-top:16px">
+          <el-button size="small" @click="cnCancel">停止等待</el-button>
+        </div>
+      </div>
+    </template>
+  </el-dialog>
+
+  <!-- 账号详情对话框 -->
+  <el-dialog v-model="detailOpen" title="账号详情" width="560px">
+    <div v-if="detail" class="json-pre">{{JSON.stringify(detail,null,2)}}</div>
+  </el-dialog>
+</div>
+
+<script>
+const {createApp,reactive,ref,computed,nextTick,onMounted,onBeforeUnmount}=Vue;
+const app=createApp({
+  setup(){
+    const page=ref('dashboard');
+    const status=reactive({online:false,authFail:false,host:'',uptime:0,port:8787});
+    const pool=reactive({strategy:'failover',active_id:null,accounts:[],search_dirs:[],pool_stats:{}});
+    const stats=reactive({today_requests:0,warns:0,errors:0,content_filters:0,avg_duration:0,today_credit:0});
+    const accounts=computed(()=>pool.accounts);
+    const activeAcct=computed(()=>pool.accounts.find(a=>a.id===pool.active_id)||null);
+    const apiKeyHint=ref('');
+    const checkErr=ref('');
+
+    // 日志
+    const logs=reactive([]);
+    const logLevel=ref('');
+    const logQuery=ref('');
+    const wsConnected=ref(false);
+    const logBox=ref(null);
+    let ws=null; let wsPaused=false;
+    const filteredLogs=computed(()=>{
+      let l=logs.filter(x=>!logLevel.value||x.level===logLevel.value);
+      if(logQuery.value){const q=logQuery.value.toLowerCase();l=l.filter(x=>(x.msg+x.model+x.rid).toLowerCase().includes(q));}
+      return l.slice(-500);
+    });
+
+    // 配置
+    const cfg=reactive({port:8787,api_key:'',log_path:'',desensitize:false,no_compact:false,models:[]});
+
+    // 向导
+    const wizard=reactive({codex:'',cc:'',openai:'',cmd:''});
+
+    // 对话框
+    const importOpen=ref(false);const importPath=ref('');const importName=ref('');
+    const detailOpen=ref(false);const detail=ref(null);
+    const checkingId=ref('');
+    const checkinId=ref('');
+
+    async function api(path,opt={}){
+      const h=opt.headers||{};
+      const K=localStorage.getItem('wb2api_key')||'';
+      if(K)h['Authorization']='Bearer '+K;
+      opt.headers=h;opt.cache='no-store';
+      const r=await fetch(path,opt);
+      let data=null;
+      try{data=await r.json();}catch(e){}
+      if(!r.ok){const msg=(data&&(data.detail?.error?.message||data.detail))||('HTTP '+r.status);const err=new Error(typeof msg==='string'?msg:JSON.stringify(msg));err.status=r.status;throw err;}
+      return data;
+    }
+    const var_ok=()=>'var(--ok)';
+
+    async function loadDashboard(){
+      try{
+        const s=await api('/api/status');
+        status.online=true;status.authFail=false;status.uptime=s.uptime||0;status.host=(location.host);
+        const p=await api('/api/accounts');Object.assign(pool,p);
+        Object.assign(stats,await api('/api/logs/stats'));
+        const c=await api('/api/config');apiKeyHint.value=c.api_key_hint;
+        buildTrend();
+      }catch(e){if(e.status===401){status.online=true;status.authFail=true;checkErr.value='API Key 未配置或错误，请在右上角设置中填写正确的 Key 后保存';}else{status.online=false;checkErr.value=e.message;}}
+    }
+    async function loadAccounts(){
+      try{const p=await api('/api/accounts');Object.assign(pool,p);}catch(e){checkErr.value=e.message;}
+    }
+    async function loadConfig(){
+      try{
+        const c=await api('/api/config');
+        cfg.port=c.port;cfg.api_key=c.api_key?(localStorage.getItem('wb2api_key')||''):'';cfg.log_path=c.log_path||'';cfg.desensitize=c.desensitize;cfg.no_compact=c.no_compact;cfg.models=[...c.models];
+        apiKeyHint.value=c.api_key_hint;
+      }catch(e){checkErr.value=e.message;}
+    }
+    async function saveConfig(){
+      const oldKey=localStorage.getItem('wb2api_key')||'';
+      try{
+        const body={desensitize:cfg.desensitize,no_compact:cfg.no_compact,log_path:cfg.log_path,models:cfg.models.filter(x=>x.trim())};
+        if(cfg.api_key!==''&&cfg.api_key!==(apiKeyHint.value||'')){body.api_key=cfg.api_key;localStorage.setItem('wb2api_key',cfg.api_key);}
+        const r=await api('/api/config',{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+        ElementPlus.ElMessage.success('配置已保存：'+(r.updated||[]).join('；'));
+        loadConfig();
+      }catch(e){
+        if(e.status===401&&oldKey!==null)localStorage.setItem('wb2api_key',oldKey);
+        ElementPlus.ElMessage.error('保存失败：'+e.message);
+      }
+    }
+    async function switchAcct(id){
+      try{await api('/api/accounts/'+id+'/switch',{method:'POST'});ElementPlus.ElMessage.success('已切换');loadAccounts();loadDashboard();}
+      catch(e){ElementPlus.ElMessage.error(e.message);}
+    }
+    async function checkAcct(id){
+      checkingId.value=id;
+      try{const r=await api('/api/accounts/'+id+'/check',{method:'POST'});
+        if(r.status==='ok')ElementPlus.ElMessage.success(r.detail);else ElementPlus.ElMessage.warning(r.detail);
+        loadAccounts();}catch(e){ElementPlus.ElMessage.error(e.message);}finally{checkingId.value='';}
+    }
+    async function checkinAcct(row){
+      checkinId.value=row.id;
+      try{
+        const r=await api('/api/billing/checkin',{method:'POST'});
+        const hit=r.results?.find(x=>x.name===row.name);
+        if(hit){ if(hit.already)ElementPlus.ElMessage.info('今日已签到：'+row.name); else if(hit.checked)ElementPlus.ElMessage.success(hit.message||'签到成功'); else ElementPlus.ElMessage.warning(hit.message||'签到失败'); }
+        else ElementPlus.ElMessage.info('签到结果已处理（企业账号自动跳过）');
+        loadAccounts();loadDashboard();
+      }catch(e){ElementPlus.ElMessage.error(e.message);}finally{checkinId.value='';}
+    }
+    function viewAcct(row){detail.value=row;detailOpen.value=true;}
+    async function doImport(){
+      try{await api('/api/accounts/import',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({path:importPath.value,name:importName.value})});
+        ElementPlus.ElMessage.success('导入成功');importOpen.value=false;importPath.value='';importName.value='';loadAccounts();}
+      catch(e){ElementPlus.ElMessage.error(e.message);}
+    }
+    // -- CodeBuddy CN 一键添加账号 --------------------------------------
+    const cnPolling=ref(false);const cnPollMsg=ref('');let cnTimer=null;
+    function cnOpenDialog(){importOpen.value=true;}
+    function cnCancel(){cnPolling.value=false;if(cnTimer){clearInterval(cnTimer);cnTimer=null;}}
+    async function cnOpen(){
+      try{const r=await api('/api/accounts/cn/open',{method:'POST'});
+        ElementPlus.ElMessage.success(r.message||'已打开 CodeBuddy');cnPolling.value=true;cnPollMsg.value='等待登录中…';startCnPoll();}
+      catch(e){ElementPlus.ElMessage.error(e.message);}
+    }
+    async function cnPoll(){
+      try{const r=await api('/api/accounts/cn/detect');
+        if(r.found){cnCancel();cnPollMsg.value='检测到新账号，正在导入…';const imp=await api('/api/accounts/cn/import',{method:'POST'});
+          if(imp.ok){ElementPlus.ElMessage.success(imp.message);importOpen.value=false;loadAccounts();loadDashboard();}
+          else ElementPlus.ElMessage.warning(imp.message||'导入未完成');}
+        else cnPollMsg.value=r.reason||'未检测到新账号';}
+      catch(e){cnPollMsg.value='检测失败：'+e.message;}
+    }
+    function startCnPoll(){if(cnTimer)clearInterval(cnTimer);cnTimer=setInterval(cnPoll,3000);}
+    async function setStrategy(v){
+      try{await api('/api/accounts/strategy',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({strategy:v})});
+        ElementPlus.ElMessage.success('路由策略：'+strategyLabel(v)+'（积分耗尽时自动切换其他账号顶上）');}catch(e){ElementPlus.ElMessage.error(e.message);}
+    }
+    async function markExhausted(id){
+      try{
+        const r=await api('/api/accounts/'+id+'/exhaust',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({reason:'manual mark from UI'})});
+        ElementPlus.ElMessage.warning('已标记积分耗尽：'+r.name+'（路由将自动顶上其他账号）');loadAccounts();loadDashboard();
+      }catch(e){ElementPlus.ElMessage.error(e.message);}
+    }
+    async function recoverAcct(id){
+      try{
+        const r=await api('/api/accounts/'+id+'/recover',{method:'POST'});
+        ElementPlus.ElMessage.success('已恢复账号：'+r.name+'（重新参与路由）');loadAccounts();loadDashboard();
+      }catch(e){ElementPlus.ElMessage.error(e.message);}
+    }
+    function healthMeta(row){
+      if(!row)return {cls:'idle',text:'-'};
+      if(row.token_expired)return {cls:'err',text:'Token已过期'};
+      if(row.health==='disabled')return {cls:'idle',text:'已停用'};
+      if(row.health==='exhausted')return {cls:'exhausted',text:'积分耗尽'};
+      if(row.health==='cooldown')return {cls:'cooldown',text:'冷却中'};
+      if(row.check_error)return {cls:'warn',text:'异常'};
+      return {cls:'ok',text:'正常'};
+    }
+    function strategyLabel(s){return s==='failover'?'自动顶上':(s==='auto'?'轮询':'固定');}
+
+    // ---- 日志 WS ----
+    const _logKey=o=>o.level+'|'+o.ts+'|'+(o.rid||'')+'|'+o.msg;
+    let _seen=null; // 日志去重集合（防多连接/重连回放造成的重复）
+    function connectLogs(){
+      if(ws&&(ws.readyState===0||ws.readyState===1)){wsPaused=false;return;} // 已有活动连接：直接复用
+      if(ws)try{ws.onclose=null;ws.close();}catch(e){}
+      const proto=location.protocol==='https:'?'wss':'ws';
+      ws=new WebSocket(`${proto}://${location.host}/api/ws/logs`);
+      _seen=new Set();      // 新一轮历史回放，重建去重索引
+      logs.length=0;        // 清掉旧数据，避免新旧两轮历史叠加
+      ws.onopen=()=>{wsConnected.value=true;wsPaused=false;};
+      ws.onmessage=(ev)=>{ if(wsPaused)return;
+        const o=JSON.parse(ev.data);
+        const k=_logKey(o);
+        if(_seen.has(k))return;
+        _seen.add(k);
+        if(_seen.size>4000)_seen=new Set(Array.from(_seen).slice(-2000));
+        logs.push(o); if(logs.length>2000)logs.splice(0,logs.length-2000);
+        nextTick(()=>{const box=logBox.value;if(box&&!userScrolled)box.scrollTop=box.scrollHeight;}); };
+      ws.onclose=()=>{wsConnected.value=false;setTimeout(connectLogs,2000);};
+    }
+    let userScrolled=false;
+    function onLogScroll(e){const b=e.target;userScrolled=(b.scrollHeight-b.scrollTop-b.clientHeight)>60;}
+    function toggleLogs(){wsPaused=!wsPaused;}
+    function clearLogs(){logs.length=0;}
+    function connect(){if(page.value!=='logs'){if(ws)ws.close();return;}connectLogs();}
+
+    // ---- 趋势图 ----
+    let chart=null;
+    function buildTrend(){
+      const el=document.getElementById('trend');if(!el)return;
+      if(!chart)chart=echarts.init(el,'dark',{renderer:'canvas'});
+      const data=logs.filter(x=>x.msg.includes('RESPONSE')).slice(-30).map((x,i)=>{
+        let dur=0;const m=x.msg.match(/\| ([\d.]+)s \|/);if(m)dur=parseFloat(m[1]);
+        return {time:x.time,dur};
+      });
+      chart.setOption({
+        backgroundColor:'transparent',
+        tooltip:{trigger:'axis'},
+        grid:{left:40,right:16,top:20,bottom:24},
+        xAxis:{type:'category',data:data.map(d=>d.time),axisLabel:{color:'#8b93a7',fontSize:10}},
+        yAxis:{type:'value',name:'秒',nameTextStyle:{color:'#8b93a7'},axisLabel:{color:'#8b93a7'},splitLine:{lineStyle:{color:'#1c2230'}}},
+        series:[{type:'line',data:data.map(d=>d.dur),smooth:true,symbol:'none',lineStyle:{color:'#4f6ef7',width:2},areaStyle:{color:'rgba(79,110,247,.15)'}}]
+      });
+    }
+
+    function loadWizard(){
+      const host=location.host;
+      wizard.codex=[
+        '[model_providers.workbuddy]',
+        'name = "WorkBuddy (via local converter)"',
+        `base_url = "http://${host}/v1"`,
+        'wire_api = "responses"',
+        'env_key = "CODEBUDDY2OPENAI_KEY"',
+        '',
+        '[profiles.workbuddy]',
+        'model = "'+(cfg.models[0]||'auto')+'"',
+        'model_provider = "workbuddy"'
+      ].join('\n');
+      wizard.cc=JSON.stringify({
+        "DeepSeek-V4-Pro":{"base_url":`http://${host}/v1/messages`,"api_key":"","model":cfg.models.find(m=>m.includes('deepseek'))||"deepseek-v4-pro"}
+      },null,2);
+      wizard.openai=`Base URL : http://${host}/v1\nAPI Key  : ${apiKeyHint.value||'(留空)'}\n模型     : ${cfg.models.join(', ')}`;
+      wizard.cmd='python converter.py --desensitize --log converter.log';
+    }
+    function copy(t){navigator.clipboard.writeText(t).then(()=>ElementPlus.ElMessage.success('已复制'));}
+
+    function fmtUptime(s){if(!s)return'-';const d=Math.floor(s/86400),h=Math.floor(s%86400/3600),m=Math.floor(s%3600/60);return (d?d+'天 ':'')+h+'小时 '+m+'分';}
+    function fmtCredit(c){c=Number(c)||0;return c===0?'0':'≈'+c.toFixed(4).replace(/0+$/,'').replace(/\.$/,'');}
+    function fmtExpire(ms){if(!ms)return'-';const d=new Date(ms);const diff=d-new Date();if(diff<0)return '已过期';if(diff<86400000)return d.toLocaleString()+' (明天内)';return d.toLocaleDateString();}
+    function expireSoon(a){const ms=a.token_expires_at-Date.now();return ms>0&&ms<3*86400000;}
+
+    onMounted(()=>{loadDashboard();});
+    return {page,status,pool,stats,accounts,activeAcct,apiKeyHint,checkErr,
+      logs,logLevel,logQuery,filteredLogs,wsConnected,logBox,onLogScroll,toggleLogs,clearLogs,
+      cfg,loadDashboard,loadAccounts,loadConfig,saveConfig,switchAcct,checkAcct,viewAcct,doImport,setStrategy,
+      markExhausted,recoverAcct,healthMeta,strategyLabel,
+      importOpen,importPath,importName,detailOpen,detail,checkingId,checkinId,checkinAcct,
+      cnOpenDialog,cnOpen,cnPoll,cnCancel,cnPolling,cnPollMsg,
+      wizard,loadWizard,copy,var_ok,
+      fmtUptime,fmtExpire,expireSoon,fmtCredit,connectLogs};
+  }
+});
+app.use(ElementPlus);
+app.mount('#app');
+</script>
+</body>
+</html>

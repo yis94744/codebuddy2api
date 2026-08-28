@@ -30,6 +30,12 @@ import time
 from pathlib import Path
 from typing import Optional
 
+# 以 `python converter.py` 方式运行时，__main__ 与模块名 "converter" 实为同一对象。
+# 若不注册，account_pool / ui_admin 里的 `import converter` 会重复导入一份新模块，
+# 导致其 CONFIG（含 pool 等运行期状态）与主模块分裂（典型症状：/api/accounts 报 503）。
+if __name__ == "__main__":
+    sys.modules.setdefault("converter", sys.modules["__main__"])
+
 import httpx
 from fastapi import FastAPI, Header, HTTPException, Request
 from fastapi.responses import JSONResponse, StreamingResponse
@@ -52,6 +58,7 @@ from anthropic_adapter import (
     anthropic_request_to_chat,
     AnthropicStreamConverter,
 )
+from account_pool import AccountPool
 
 # ---------------------------------------------------------------------------
 # 常量
@@ -223,7 +230,9 @@ PASSTHROUGH_BODY_KEYS = {
 
 app = FastAPI(title="codebuddy2openai", version="2.0")
 CONFIG: dict = {"api_key": "", "cred": None, "log_path": None,
-                "desensitize": False, "no_compact": False}  # cred: CredentialManager | None
+                "desensitize": False, "no_compact": False,
+                "pool": None, "started_at": time.time(),
+                "host": "127.0.0.1", "port": 8787}  # pool: AccountPool | None
 
 
 # ---------------------------------------------------------------------------
@@ -234,17 +243,44 @@ _LOG_LOCK = threading.Lock()
 
 
 def _log(msg: str):
-    """写一行日志到 CONFIG['log_path'] 指定的文件（追加，带时间戳）。未设置则丢弃。"""
+    """写一行日志到 CONFIG['log_path'] 指定的文件（追加，带时间戳）。未设置则丢弃。
+    同时推送到 UI 日志总线（内存缓冲 + WebSocket 广播）。"""
     path = CONFIG.get("log_path")
-    if not path:
-        return
-    line = f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] {msg}\n"
+    if path:
+        line = f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] {msg}\n"
+        try:
+            with _LOG_LOCK:
+                with open(path, "a", encoding="utf-8") as f:
+                    f.write(line)
+        except OSError:
+            pass  # 日志失败不应影响主流程
+    # UI 日志总线
     try:
-        with _LOG_LOCK:
-            with open(path, "a", encoding="utf-8") as f:
-                f.write(line)
-    except OSError:
-        pass  # 日志失败不应影响主流程
+        from ui_admin import LOG_BUS
+        if "审核拦截" in msg or "content-filter" in msg:
+            level = "warn"
+        elif "✗" in msg or "错误" in msg or "失败" in msg or "invalid" in msg:
+            level = "error"
+        elif "💰" in msg or "▶" in msg or "◀" in msg or "↻" in msg:
+            level = "info"
+        else:
+            level = "info"
+        LOG_BUS.emit(msg, level=level)
+    except Exception:
+        pass  # UI 模块缺失或未初始化时不影响主流程
+
+
+def _verbose() -> bool:
+    return bool(CONFIG.get("verbose"))
+
+
+def _log_v(build):
+    """仅 verbose 模式记录；build 为无参函数，避免非 verbose 时构造大字符串。"""
+    if _verbose():
+        try:
+            _log(build())
+        except Exception:
+            pass
 
 
 
@@ -268,9 +304,106 @@ def _check_auth(authorization: Optional[str], x_api_key: Optional[str]):
 
 
 def _cred() -> CredentialManager:
+    """返回当前路由到的账号凭据：优先用账号池，兼容旧的单一 cred。"""
+    pool = CONFIG.get("pool")
+    if pool is not None:
+        cred = pool.resolve()
+        if cred is not None:
+            return cred
     if CONFIG["cred"] is None:
         raise HTTPException(status_code=503, detail={"error": {"message": "未找到登录凭据，请先在桌面端登录 CodeBuddy/WorkBuddy", "type": "auth_error"}})
     return CONFIG["cred"]
+
+
+# ---------------------------------------------------------------------------
+# 故障转移：积分耗尽 / 限流 / 鉴权失败 时自动切换账号顶上
+# ---------------------------------------------------------------------------
+
+# 触发自动切换账号的错误类别
+RETRY_KINDS = ("quota", "rate", "auth")
+
+# 命中即判定为"积分/额度不足"的关键词（后端错误体里常见）
+QUOTA_KEYWORDS = (
+    "quota", "balance", "insufficient", "credit", "exhaust", "free.quota",
+    "额度", "积分", "余额", "点数", "不足", "用尽", "耗尽", "已用完", "无可用",
+)
+RATE_KEYWORDS = ("rate.limit", "too many", "频繁", "限流", "请求过快")
+
+
+def _classify_upstream_error(status: int, text: str = "") -> str:
+    """把上游错误分类：quota(积分/额度) / rate(限流) / auth(鉴权) / other / 空(非错误)。"""
+    low = (text or "").lower()
+    if status == 402:
+        return "quota"
+    if status == 429:
+        return "rate"
+    if status == 401:
+        return "auth"
+    if status >= 400:
+        if any(kw in low for kw in QUOTA_KEYWORDS):
+            return "quota"
+        if any(kw in low for kw in RATE_KEYWORDS):
+            return "rate"
+        return "other"
+    return ""
+
+
+class _SingleAccount:
+    """单账号模式的 Account 兼容包装，让故障转移逻辑统一工作（pool 为空时使用）。"""
+    __slots__ = ("id", "name", "credential")
+
+    def __init__(self, cred: CredentialManager):
+        self.id = ""
+        self.name = "default"
+        self.credential = cred
+
+
+def _route_account():
+    """路由到本次请求应使用的账号（failover 策略下自动跳过不可用账号）。
+
+    返回对象需具备 .id / .name / .credential（Account 或 _SingleAccount）。
+    """
+    pool = CONFIG.get("pool")
+    if pool is not None:
+        acct = pool.resolve_account()
+        if acct is not None:
+            return acct
+    if CONFIG["cred"] is None:
+        raise HTTPException(status_code=503, detail={"error": {"message": "未找到登录凭据，请先在桌面端登录 CodeBuddy/WorkBuddy", "type": "auth_error"}})
+    return _SingleAccount(CONFIG["cred"])
+
+
+async def _with_failover(account, func):
+    """以账号为粒度执行 func(account) -> (status, result)。
+
+    当上游返回可切换错误（积分耗尽/限流/鉴权失败）时，标记当前账号为失败
+    并自动切换到下一个可用账号重试，实现"这个账号积分空了其他账号顶上"。
+
+    返回最终 (status, result, account)。result 在 status == 200 时由 func 决定类型，
+    否则为 bytes（上游错误体）。
+    """
+    pool = CONFIG.get("pool")
+    if pool is None or len(pool.accounts) <= 1:
+        status, result = await func(account)
+        return status, result, account
+    cur = account
+    attempts = len(pool.accounts)
+    for i in range(attempts):
+        status, result = await func(cur)
+        if status == 200:
+            pool.mark_success(cur.id)
+            return status, result, cur
+        text = result.decode("utf-8", "replace") if isinstance(result, bytes) else ""
+        kind = _classify_upstream_error(status, text)
+        if kind not in RETRY_KINDS or i == attempts - 1:
+            return status, result, cur
+        pool.mark_fail(cur.id, reason=f"HTTP {status} {_truncate(text, 160)}", kind=kind)
+        nxt = pool.next_available(exclude_id=cur.id)
+        if nxt is None:
+            return status, result, cur
+        _log(f"[failover] ↻ 切换账号 {cur.name} → {nxt.name}（{kind}，第 {i + 2}/{attempts} 次尝试）")
+        cur = nxt
+    return status, result, cur
 
 
 @app.get("/health")
@@ -300,7 +433,7 @@ async def chat_completions(request: Request,
                            authorization: Optional[str] = Header(default=None),
                            x_api_key: Optional[str] = Header(default=None, alias="X-Api-Key")):
     _check_auth(authorization, x_api_key)
-    cred = _cred()
+    account = _route_account()
 
     try:
         payload = await request.json()
@@ -335,40 +468,57 @@ async def chat_completions(request: Request,
                   if isinstance(t, dict)]
     last_user = _last_user_text(messages)
     rid = os.urandom(4).hex()
-    _log(f"[{rid}] ▶ REQUEST {model_name} | stream={client_wants_stream} | msgs={len(messages)}"
-         + (f" | tools={tool_names}" if tool_names else "")
-         + (f" | last_user={_truncate(last_user, 60)!r}" if last_user else ""))
-    # 完整请求体（发往后端的实际内容；若启用脱敏，这里已是脱敏后）
-    _log(f"[{rid}] ── REQUEST BODY (发往后端) ──\n{json.dumps(body, ensure_ascii=False, indent=2)}")
+    if _verbose():
+        _log(f"[{rid}] ▶ REQUEST {model_name} | stream={client_wants_stream} | msgs={len(messages)}"
+             + (f" | tools={tool_names}" if tool_names else "")
+             + (f" | last_user={_truncate(last_user, 60)!r}" if last_user else ""))
+    # 完整请求体（发往后端的实际内容；若启用脱敏，这里已是脱敏后）——仅 verbose
+    _log_v(lambda: f"[{rid}] ── REQUEST BODY (发往后端) ──\n{json.dumps(body, ensure_ascii=False, indent=2)}")
 
-    headers = cred.get_headers()
     url = f"{BACKEND}/v2/chat/completions"
     t0 = time.time()
 
     if client_wants_stream:
         return StreamingResponse(
-            _stream_upstream(url, headers, body, model_name, t0, rid),
+            _stream_upstream(account, body, model_name, t0, rid),
             media_type="text/event-stream",
             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
         )
 
-    # 非流式：后端只支持流式，这里把后端 SSE 聚合成单个 chat.completion 响应
+    # 非流式：后端只支持流式，这里把后端 SSE 聚合成单个 chat.completion 响应；
+    # 若账号积分耗尽/被限流/鉴权失败，自动切换账号顶上重试
     try:
-        async with httpx.AsyncClient(timeout=300) as c:
-            async with c.stream("POST", url, headers=headers, json=body) as r:
-                if r.status_code != 200:
-                    raw = await r.aread()
-                    _log(f"[{rid}] ✗ HTTP {r.status_code} | {model_name} | {_truncate(raw.decode('utf-8','replace'),200)}")
-                    _log(f"[{rid}] ── ERROR BODY ──\n{raw.decode('utf-8','replace')}")
-                    raise HTTPException(status_code=r.status_code, detail=_safe_err_raw(raw, r.status_code))
-                collected = await _collect_stream(r)
+        status, result, account = await _with_failover(
+            account, lambda a: _post_chat_once(a, body, rid, model_name))
+        if status != 200:
+            _log(f"[{rid}] ✗ HTTP {status} | {model_name} | {_truncate(result.decode('utf-8','replace'),200)}")
+            raise HTTPException(status_code=status, detail=_safe_err_raw(result, status))
+        collected = result
     except HTTPException:
         raise
     except httpx.HTTPError as e:
         _log(f"[{rid}] ✗ 网络错误 | {model_name} | {e}")
         raise HTTPException(status_code=502, detail={"error": {"message": f"upstream error: {e}", "type": "upstream_error"}})
-    _log_finish(model_name, t0, collected, rid)
+    _log_finish(model_name, t0, collected, rid, account=account)
     return JSONResponse(content=collected)
+
+
+async def _post_chat_once(account, body, rid="", model_name="?"):
+    """用指定账号向后端转发一次（后端仅支持流式，这里聚合返回）。
+
+    返回 (status, result)：status != 200 时 result 为错误体 bytes。
+    """
+    headers = account.credential.get_headers()
+    url = f"{BACKEND}/v2/chat/completions"
+    async with httpx.AsyncClient(timeout=300) as c:
+        async with c.stream("POST", url, headers=headers, json=body) as r:
+            if r.status_code != 200:
+                raw = await r.aread()
+                _log(f"[{rid}] ✗ HTTP {r.status_code} | {model_name} | {_truncate(raw.decode('utf-8','replace'),200)}")
+                _log_v(lambda: f"[{rid}] ── ERROR BODY ──\n{raw.decode('utf-8','replace')}")
+                return r.status_code, raw
+            collected = await _collect_stream(r)
+            return 200, collected
 
 
 def _last_user_text(messages: list) -> str:
@@ -386,24 +536,75 @@ def _last_user_text(messages: list) -> str:
     return ""
 
 
-def _log_finish(model_name: str, t0: float, result: dict, rid: str = ""):
-    """记录一次完成的请求：耗时 / finish_reason / usage / 工具调用 / 审核拦截 + 完整响应。"""
-    elapsed = time.time() - t0
-    prefix = f"[{rid}] " if rid else ""
+def _fmt_c(c: float) -> str:
+    s = ("%.4f" % c).rstrip("0").rstrip(".")
+    return s or "0"
+
+
+def _log_bill(usage: dict, model: str, rid: str = "", account=None,
+              stream: bool = False):
+    """一行账单式完成日志：模型 / token 明细 / 积分 / 扣费账号 / 本次运行累计。
+
+    同时把 credit 记入 UI 统计总线（today_credit 聚合的数据源）。
+    """
+    usage = usage or {}
+    pt = usage.get("prompt_tokens", 0)
+    ct = usage.get("completion_tokens", 0)
+    tt = usage.get("total_tokens", (pt or 0) + (ct or 0))
+    try:
+        c = float(usage.get("credit") or 0)
+    except (TypeError, ValueError):
+        c = 0.0
+    spent = 0.0
+    if account is not None and c > 0:
+        try:
+            spent = account.add_credit(c)
+        except Exception:
+            spent = 0.0
+    name = getattr(account, "name", "") or "?"
+    toks = f"{pt}+{ct}={tt}" if tt != "?" else "?"
+    line = (f"💰 [{rid}] {model} | tok {toks} | {c:.4f}分"
+            f" | 账号:{name} | 累计:{_fmt_c(spent)}"
+            + (" | 流式" if stream else ""))
+    # 文件日志
+    path = CONFIG.get("log_path")
+    if path:
+        try:
+            with _LOG_LOCK:
+                with open(path, "a", encoding="utf-8") as f:
+                    f.write(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] {line}\n")
+        except OSError:
+            pass
+    # UI 总线（携带 credit 数值供 today_credit 聚合）
+    try:
+        from ui_admin import LOG_BUS
+        LOG_BUS.emit(line, level="credit", rid=rid, model=model, credit=c)
+    except Exception:
+        pass
+
+
+def _report_credit(usage: dict, model: str = "", rid: str = "", account=None,
+                   stream: bool = False):
+    """兼容入口：统一走账单行（verbose 模式额外补完整 usage 上下文）。"""
+    _log_bill(usage, model, rid=rid, account=account, stream=stream)
+    if _verbose():
+        _log_v(lambda: f"[{rid}] ── USAGE ──\n{json.dumps(usage, ensure_ascii=False)}")
+
+
+def _log_finish(model_name: str, t0: float, result: dict, rid: str = "",
+                account=None):
+    """记录一次完成的请求：账单一行；完整响应体仅 verbose 模式记录。"""
     choice = (result.get("choices") or [{}])[0]
     finish = choice.get("finish_reason")
     msg = choice.get("message") or {}
     tcs = msg.get("tool_calls") or []
     usage = result.get("usage") or {}
-    tag = ""
-    if finish == "content-filter":
-        tag = " ⚠️内容审核拦截"
+    tag = " ⚠️内容审核拦截" if finish == "content-filter" else ""
     tc_names = [t.get("function", {}).get("name") for t in tcs]
-    _log(f"{prefix}◀ RESPONSE {model_name} | {elapsed:.1f}s | finish={finish}{tag}"
-         + (f" | tool_calls={tc_names}" if tc_names else "")
-         + f" | tokens={usage.get('total_tokens', '?')}")
-    # 完整响应体
-    _log(f"{prefix}── RESPONSE BODY ──\n{json.dumps(result, ensure_ascii=False, indent=2)}")
+    extra = (f" | tool_calls={tc_names}" if tc_names else "") + tag
+    # 完整响应体（verbose）
+    _log_v(lambda: f"[{rid}] ── RESPONSE BODY{extra} ──\n{json.dumps(result, ensure_ascii=False, indent=2)}")
+    _report_credit(usage, model_name, rid=rid, account=account)
 
 
 async def _collect_stream(response: httpx.Response) -> dict:
@@ -479,12 +680,13 @@ def _safe_err_raw(raw: bytes, status: int) -> dict:
         return {"error": {"message": raw.decode("utf-8", "replace")[:500], "type": "upstream_error", "code": status}}
 
 
-async def _stream_upstream(url: str, headers: dict, body: dict,
+async def _stream_upstream(account, body: dict,
                            model_name: str = "?", t0: float = 0.0, rid: str = ""):
     """把后端 SSE 原样转发给客户端（后端已是标准 OpenAI SSE，含 tool_calls）。
 
     同时轻量解析流，统计 finish_reason / tool_calls / usage 用于日志，不阻塞转发。
     完整原始 SSE 累积后落盘到日志（调试用）。
+    若上游返回可切换错误（积分耗尽/限流/鉴权失败），自动标记账号并切换重试。
     """
     finish_reason = None
     tool_names: list[str] = []
@@ -493,6 +695,11 @@ async def _stream_upstream(url: str, headers: dict, body: dict,
     buf = b""
     raw_parts: list[bytes] = []   # 累积完整原始 SSE
     prefix = f"[{rid}] " if rid else ""
+    pool = CONFIG.get("pool")
+    attempts = len(pool.accounts) if pool is not None and pool.accounts else 1
+    url = f"{BACKEND}/v2/chat/completions"
+    cur = account
+    tried = 0
 
     def _feed(chunk: bytes):
         nonlocal finish_reason, saw_filter, buf
@@ -527,32 +734,51 @@ async def _stream_upstream(url: str, headers: dict, body: dict,
             if "content-filter" in text_repr or "敏感" in text_repr or "审核" in text_repr:
                 saw_filter = True
 
-    try:
-        async with httpx.AsyncClient(timeout=None) as c:
-            async with c.stream("POST", url, headers=headers, json=body) as r:
-                if r.status_code != 200:
-                    err = await r.aread()
-                    _log(f"{prefix}✗ HTTP {r.status_code} | {model_name} | {_truncate(err.decode('utf-8','replace'),200)}")
-                    _log(f"{prefix}── ERROR BODY ──\n{err.decode('utf-8','replace')}")
-                    yield _err_event(err, r.status_code)
-                    return
-                async for chunk in r.aiter_bytes():
-                    if chunk:
-                        raw_parts.append(chunk)
-                        _feed(chunk)
-                        yield chunk
-    except httpx.HTTPError as e:
-        _log(f"{prefix}✗ 网络错误 | {model_name} | {e}")
-        yield _err_event(str(e).encode(), 502)
+    while True:
+        headers = cur.credential.get_headers()
+        try:
+            async with httpx.AsyncClient(timeout=None) as c:
+                async with c.stream("POST", url, headers=headers, json=body) as r:
+                    if r.status_code != 200:
+                        err = await r.aread()
+                        text = err.decode("utf-8", "replace")
+                        _log(f"{prefix}✗ HTTP {r.status_code} | {model_name} | {_truncate(text,200)}")
+                        kind = _classify_upstream_error(r.status_code, text)
+                        tried += 1
+                        if kind in RETRY_KINDS and tried < attempts and pool is not None:
+                            pool.mark_fail(cur.id, reason=f"HTTP {r.status_code} {_truncate(text,160)}", kind=kind)
+                            nxt = pool.next_available(exclude_id=cur.id)
+                            if nxt is not None:
+                                _log(f"{prefix}↻ 切换账号 {cur.name} → {nxt.name}（{kind}，第 {tried+1}/{attempts} 次尝试）")
+                                cur = nxt
+                                continue
+                        _log_v(lambda t=text: f"{prefix}── ERROR BODY ──\n{t}")
+                        yield _err_event(err, r.status_code)
+                        return
+                    if pool is not None:
+                        pool.mark_success(cur.id)
+                    async for chunk in r.aiter_bytes():
+                        if chunk:
+                            raw_parts.append(chunk)
+                            _feed(chunk)
+                            yield chunk
+        except httpx.HTTPError as e:
+            _log(f"{prefix}✗ 网络错误 | {model_name} | {e}")
+            yield _err_event(str(e).encode(), 502)
+        break
 
-    # 流结束：输出完成日志
-    elapsed = time.time() - t0 if t0 else 0
+    # 流结束：账单一行（verbose 补充原始 SSE 与完成摘要）
     tag = " ⚠️内容审核拦截" if (saw_filter or finish_reason == "content-filter") else ""
-    _log(f"{prefix}◀ RESPONSE {model_name} | {elapsed:.1f}s | stream finish={finish_reason}{tag}"
-         + (f" | tool_calls={tool_names}" if tool_names else "")
-         + f" | tokens={usage.get('total_tokens', '?')}")
-    # 完整原始 SSE（后端返回的全部内容）
-    _log(f"{prefix}── RESPONSE RAW SSE ──\n{b''.join(raw_parts).decode('utf-8','replace')}")
+    if _verbose():
+        elapsed = time.time() - t0 if t0 else 0
+        tc_n = tool_names or []
+        _log(f"{prefix}◀ RESPONSE {model_name} | {elapsed:.1f}s | stream finish={finish_reason}{tag}"
+             + (f" | tool_calls={tc_n}" if tc_n else "")
+             + f" | tokens={(usage or {}).get('total_tokens', '?')}")
+        _log_v(lambda: f"{prefix}── RESPONSE RAW SSE ──\n{b''.join(raw_parts).decode('utf-8','replace')}")
+        if tag:
+            _log(f"{prefix}◀ 流式响应被内容审核拦截")
+    _report_credit(usage or {}, model_name, rid, account=account, stream=True)
 
 
 def _safe_err(r: httpx.Response) -> dict:
@@ -605,15 +831,17 @@ async def _post_backend_once(url: str, headers: dict, body: dict) -> tuple[int, 
             return r.status_code, b"".join(chunks)
 
 
-async def _post_backend_with_filter_retry(url: str, headers: dict, body: dict,
+async def _post_backend_with_filter_retry(url: str, account, body: dict,
                                           rid: str = "", model_name: str = "?") -> tuple[int, bytes, dict]:
+    """用指定账号请求后端；命中内容审核且未 compact 时，同账号 compact 重试一次。"""
     prefix = f"[{rid}] " if rid else ""
+    headers = account.credential.get_headers()
     status, raw = await _post_backend_once(url, headers, body)
     text = raw.decode("utf-8", "replace")
     if status == 200 and _looks_like_content_filter_text(text) and CONFIG.get("desensitize") and CONFIG.get("no_compact"):
         retry_body = _chat_body_desensitize(body, force_compact=True)
         _log(f"{prefix}↻ RESPONSES {model_name} | content filter detected, retry with compact harness")
-        _log(f"{prefix}── RESPONSES RETRY CHAT BODY ──\n{json.dumps(retry_body, ensure_ascii=False, indent=2)}")
+        _log_v(lambda: f"{prefix}── RESPONSES RETRY CHAT BODY ──\n{json.dumps(retry_body, ensure_ascii=False, indent=2)}")
         retry_status, retry_raw = await _post_backend_once(url, headers, retry_body)
         retry_text = retry_raw.decode("utf-8", "replace")
         if retry_status == 200 and not _looks_like_content_filter_text(retry_text):
@@ -636,7 +864,7 @@ async def create_response(request: Request,
     转换为 Responses 语义事件流返回。
     """
     _check_auth(authorization, x_api_key)
-    cred = _cred()
+    account = _route_account()
 
     try:
         payload = await request.json()
@@ -660,9 +888,10 @@ async def create_response(request: Request,
     client_wants_stream = payload.get("stream", True)  # Codex CLI 默认 stream
     model_name = payload.get("model", "auto")
     rid = os.urandom(4).hex()
-    _log(f"[{rid}] ▶ RESPONSES {model_name} | stream={client_wants_stream} | input_items={len(payload.get('input', []))}")
-    _log(
-        f"[{rid}] ── RESPONSES PROJECTION ── "
+    if _verbose():
+        _log(f"[{rid}] ▶ RESPONSES {model_name} | stream={client_wants_stream} | input_items={len(payload.get('input', []))}")
+        _log(
+            f"[{rid}] ── RESPONSES PROJECTION ── "
         f"mode={projection_stats.get('mode')} "
         f"| msgs {projection_stats.get('original_messages')}→{projection_stats.get('projected_messages')} "
         f"| chars {projection_stats.get('original_message_chars')}→{projection_stats.get('projected_message_chars')} "
@@ -672,29 +901,27 @@ async def create_response(request: Request,
         f"| dropped_harness={projection_stats.get('dropped_harness_messages', 0)} "
         f"| anchor_user={projection_stats.get('anchor_user_preserved', False)}"
     )
-    _log(f"[{rid}] ── RESPONSES → CHAT BODY ──\n{json.dumps(chat_body, ensure_ascii=False, indent=2)}")
-
-    headers = cred.get_headers()
+    _log_v(lambda: f"[{rid}] ── RESPONSES → CHAT BODY ──\n{json.dumps(chat_body, ensure_ascii=False, indent=2)}")
     url = f"{BACKEND}/v2/chat/completions"
     t0 = time.time()
 
     if client_wants_stream:
         return StreamingResponse(
-            _stream_responses(url, headers, chat_body, model_name, t0, rid),
+            _stream_responses(account, chat_body, model_name, t0, rid),
             media_type="text/event-stream",
             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
         )
 
-    # 非流式：聚合后端 SSE → 非流式 Response 对象
+    # 非流式：聚合后端 SSE → 非流式 Response 对象；账号积分耗尽/限流/鉴权失败自动切换
     try:
-        status_code, raw, final_body = await _post_backend_with_filter_retry(url, headers, chat_body, rid, model_name)
+        status_code, raw, account = await _with_failover(
+            account, lambda a: _post_responses_once(a, chat_body, rid, model_name))
         if status_code != 200:
             _log(f"[{rid}] ✗ HTTP {status_code} | {model_name} | {_truncate(raw.decode('utf-8','replace'),200)}")
             raise HTTPException(status_code=status_code, detail=_safe_err_raw(raw, status_code))
         converter = ResponsesStreamConverter(model=model_name)
         for line in raw.decode("utf-8", "replace").splitlines():
             converter.feed_line(line)
-        chat_body = final_body
     except HTTPException:
         raise
     except httpx.HTTPError as e:
@@ -702,25 +929,61 @@ async def create_response(request: Request,
         raise HTTPException(status_code=502, detail={"error": {"message": f"upstream error: {e}", "type": "upstream_error"}})
 
     result = converter.get_nonstream_response()
-    elapsed = time.time() - t0
-    _log(f"[{rid}] ◀ RESPONSES {model_name} | {elapsed:.1f}s")
-    _log(f"[{rid}] ── RESPONSE OBJ ──\n{json.dumps(result, ensure_ascii=False, indent=2)}")
+    if _verbose():
+        elapsed = time.time() - t0
+        _log(f"[{rid}] ◀ RESPONSES {model_name} | {elapsed:.1f}s")
+        _log_v(lambda: f"[{rid}] ── RESPONSE OBJ ──\n{json.dumps(result, ensure_ascii=False, indent=2)}")
+    _report_credit((result.get("usage") or {}), model_name, rid, account=account)
     return JSONResponse(content=result)
 
 
-async def _stream_responses(url: str, headers: dict, body: dict,
+async def _post_responses_once(account, body: dict, rid: str = "", model_name: str = "?"):
+    """用指定账号按 Responses 流程转发一次，返回 (status, raw)。"""
+    url = f"{BACKEND}/v2/chat/completions"
+    status, raw, _ = await _post_backend_with_filter_retry(url, account, body, rid, model_name)
+    return status, raw
+
+
+async def _stream_responses(account, body: dict,
                             model_name: str = "?", t0: float = 0.0, rid: str = ""):
-    """消费后端 Chat SSE，实时转换为 Responses API 事件流输出。"""
+    """消费后端 Chat SSE，实时转换为 Responses API 事件流输出。
+
+    若账号积分耗尽/被限流/鉴权失败，自动标记并切换账号顶上重试。
+    """
     converter = ResponsesStreamConverter(model=model_name)
     prefix = f"[{rid}] " if rid else ""
+    pool = CONFIG.get("pool")
+    attempts = len(pool.accounts) if pool is not None and pool.accounts else 1
+    url = f"{BACKEND}/v2/chat/completions"
+    cur = account
+    tried = 0
 
-    try:
-        status_code, raw, _ = await _post_backend_with_filter_retry(url, headers, body, rid, model_name)
-        if status_code != 200:
-            _log(f"{prefix}✗ HTTP {status_code} | {model_name} | {_truncate(raw.decode('utf-8','replace'),200)}")
-            error_evt = {"type": "error", "error": {"message": raw.decode('utf-8','replace')[:500], "code": status_code}}
+    while True:
+        try:
+            status_code, raw, _ = await _post_backend_with_filter_retry(url, cur, body, rid, model_name)
+        except httpx.HTTPError as e:
+            _log(f"{prefix}✗ 网络错误 | {model_name} | {e}")
+            error_evt = {"type": "error", "error": {"message": str(e)[:500], "code": 502}}
             yield f"data: {json.dumps(error_evt, ensure_ascii=False)}\n\n".encode("utf-8")
             return
+        if status_code != 200:
+            text = raw.decode("utf-8", "replace")
+            _log(f"{prefix}✗ HTTP {status_code} | {model_name} | {_truncate(text,200)}")
+            kind = _classify_upstream_error(status_code, text)
+            tried += 1
+            if kind in RETRY_KINDS and tried < attempts and pool is not None:
+                pool.mark_fail(cur.id, reason=f"HTTP {status_code} {_truncate(text,160)}", kind=kind)
+                nxt = pool.next_available(exclude_id=cur.id)
+                if nxt is not None:
+                    converter = ResponsesStreamConverter(model=model_name)  # 重置转换器状态
+                    _log(f"{prefix}↻ 切换账号 {cur.name} → {nxt.name}（{kind}，第 {tried+1}/{attempts} 次尝试）")
+                    cur = nxt
+                    continue
+            error_evt = {"type": "error", "error": {"message": text[:500], "code": status_code}}
+            yield f"data: {json.dumps(error_evt, ensure_ascii=False)}\n\n".encode("utf-8")
+            return
+        if pool is not None:
+            pool.mark_success(cur.id)
         raw_sse_lines = []
         for line in raw.decode("utf-8", "replace").splitlines():
             if line.strip():
@@ -728,20 +991,19 @@ async def _stream_responses(url: str, headers: dict, body: dict,
             events = converter.feed_line(line)
             if events:
                 yield events.encode("utf-8")
-    except httpx.HTTPError as e:
-        _log(f"{prefix}✗ 网络错误 | {model_name} | {e}")
-        error_evt = {"type": "error", "error": {"message": str(e)[:500], "code": 502}}
-        yield f"data: {json.dumps(error_evt, ensure_ascii=False)}\n\n".encode("utf-8")
-        return
+        break
 
     # 发送收尾事件
     finish_events = converter.finish()
     if finish_events:
         yield finish_events.encode("utf-8")
 
-    elapsed = time.time() - t0 if t0 else 0
-    _log(f"{prefix}◀ RESPONSES {model_name} | {elapsed:.1f}s | stream done")
-    _log(f"{prefix}── RESPONSES RAW SSE ──\n" + "\n".join(raw_sse_lines[-30:]))
+    if _verbose():
+        elapsed = time.time() - t0 if t0 else 0
+        _log(f"{prefix}◀ RESPONSES {model_name} | {elapsed:.1f}s | stream done")
+        _log(f"{prefix}── RESPONSES RAW SSE ──\n" + "\n".join(raw_sse_lines[-30:]))
+    raw_usage = getattr(converter, "_usage", None)
+    _report_credit(raw_usage or {}, model_name, rid, account=cur, stream=True)
 
 
 # ---------------------------------------------------------------------------
@@ -759,7 +1021,7 @@ async def create_message(request: Request,
     转换为 Anthropic SSE 事件流返回。
     """
     _check_auth(authorization, x_api_key)
-    cred = _cred()
+    account = _route_account()
 
     try:
         payload = await request.json()
@@ -791,51 +1053,78 @@ async def create_message(request: Request,
     model_name = payload.get("model", "auto")
     chat_messages = chat_body.get("messages", [])
     rid = os.urandom(4).hex()
-    _log(f"[{rid}] ▶ ANTHROPIC {model_name} | msgs={len(chat_messages)} | anthropic_msgs={len(messages)}")
-    _log(f"[{rid}] ── ANTHROPIC → CHAT BODY ──\n{json.dumps(chat_body, ensure_ascii=False, indent=2)}")
+    if _verbose():
+        _log(f"[{rid}] ▶ ANTHROPIC {model_name} | msgs={len(chat_messages)} | anthropic_msgs={len(messages)}")
+        _log_v(lambda: f"[{rid}] ── ANTHROPIC → CHAT BODY ──\n{json.dumps(chat_body, ensure_ascii=False, indent=2)}")
 
-    headers = cred.get_headers()
     url = f"{BACKEND}/v2/chat/completions"
     t0 = time.time()
 
     return StreamingResponse(
-        _stream_anthropic(url, headers, chat_body, model_name, t0, rid),
+        _stream_anthropic(account, chat_body, model_name, t0, rid),
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
 
 
-async def _stream_anthropic(url: str, headers: dict, body: dict,
+async def _stream_anthropic(account, body: dict,
                             model_name: str = "?", t0: float = 0.0, rid: str = ""):
-    """消费后端 OpenAI Chat SSE，实时转换为 Anthropic Messages SSE 事件流。"""
+    """消费后端 OpenAI Chat SSE，实时转换为 Anthropic Messages SSE 事件流。
+
+    若账号积分耗尽/被限流/鉴权失败，自动标记并切换账号顶上重试。
+    """
     converter = AnthropicStreamConverter(model=model_name)
     prefix = f"[{rid}] " if rid else ""
+    pool = CONFIG.get("pool")
+    attempts = len(pool.accounts) if pool is not None and pool.accounts else 1
+    url = f"{BACKEND}/v2/chat/completions"
+    cur = account
+    tried = 0
 
-    try:
-        async with httpx.AsyncClient(timeout=None) as c:
-            async with c.stream("POST", url, headers=headers, json=body) as r:
-                if r.status_code != 200:
-                    err = await r.aread()
-                    _log(f"{prefix}✗ HTTP {r.status_code} | {model_name} | {_truncate(err.decode('utf-8','replace'),200)}")
-                    error_evt = {"type": "error", "error": {"message": err.decode('utf-8','replace')[:500], "type": "api_error", "code": r.status_code}}
-                    yield f"event: error\ndata: {json.dumps(error_evt, ensure_ascii=False)}\n\n".encode("utf-8")
-                    return
-                async for line in r.aiter_lines():
-                    events = converter.feed_line(line)
-                    if events:
-                        yield events.encode("utf-8")
-    except httpx.HTTPError as e:
-        _log(f"{prefix}✗ 网络错误 | {model_name} | {e}")
-        error_evt = {"type": "error", "error": {"message": str(e)[:500], "type": "api_error", "code": 502}}
-        yield f"event: error\ndata: {json.dumps(error_evt, ensure_ascii=False)}\n\n".encode("utf-8")
-        return
+    while True:
+        headers = cur.credential.get_headers()
+        try:
+            async with httpx.AsyncClient(timeout=None) as c:
+                async with c.stream("POST", url, headers=headers, json=body) as r:
+                    if r.status_code != 200:
+                        err = await r.aread()
+                        text = err.decode("utf-8", "replace")
+                        _log(f"{prefix}✗ HTTP {r.status_code} | {model_name} | {_truncate(text,200)}")
+                        kind = _classify_upstream_error(r.status_code, text)
+                        tried += 1
+                        if kind in RETRY_KINDS and tried < attempts and pool is not None:
+                            pool.mark_fail(cur.id, reason=f"HTTP {r.status_code} {_truncate(text,160)}", kind=kind)
+                            nxt = pool.next_available(exclude_id=cur.id)
+                            if nxt is not None:
+                                converter = AnthropicStreamConverter(model=model_name)  # 重置转换器状态
+                                _log(f"{prefix}↻ 切换账号 {cur.name} → {nxt.name}（{kind}，第 {tried+1}/{attempts} 次尝试）")
+                                cur = nxt
+                                continue
+                        error_evt = {"type": "error", "error": {"message": text[:500], "type": "api_error", "code": r.status_code}}
+                        yield f"event: error\ndata: {json.dumps(error_evt, ensure_ascii=False)}\n\n".encode("utf-8")
+                        return
+                    if pool is not None:
+                        pool.mark_success(cur.id)
+                    async for line in r.aiter_lines():
+                        events = converter.feed_line(line)
+                        if events:
+                            yield events.encode("utf-8")
+        except httpx.HTTPError as e:
+            _log(f"{prefix}✗ 网络错误 | {model_name} | {e}")
+            error_evt = {"type": "error", "error": {"message": str(e)[:500], "type": "api_error", "code": 502}}
+            yield f"event: error\ndata: {json.dumps(error_evt, ensure_ascii=False)}\n\n".encode("utf-8")
+            return
+        break
 
     finish_events = converter.finish()
     if finish_events:
         yield finish_events.encode("utf-8")
 
-    elapsed = time.time() - t0 if t0 else 0
-    _log(f"{prefix}◀ ANTHROPIC {model_name} | {elapsed:.1f}s | stream done")
+    if _verbose():
+        elapsed = time.time() - t0 if t0 else 0
+        _log(f"{prefix}◀ ANTHROPIC {model_name} | {elapsed:.1f}s | stream done")
+    raw_usage = getattr(converter, "_usage", None)
+    _report_credit(raw_usage or {}, model_name, rid, account=account, stream=True)
 
 
 @app.post("/v1/messages/count_tokens")
@@ -870,10 +1159,23 @@ def preflight() -> bool:
         ok = False
     else:
         try:
-            cm = CredentialManager(af)
-            info = cm.summary()
-            sys.stderr.write(f"账号      : {info.get('nickname')} / {info.get('enterpriseName')}\n")
-            sys.stderr.write(f"token过期 : {'是(将自动刷新)' if info['token_expired'] else '否'}\n")
+            pool = CONFIG.get("pool")
+            if pool is not None and pool.accounts:
+                stats = pool.summary().get("pool_stats", {})
+                sys.stderr.write(
+                    f"账号池    : {len(pool.accounts)} 个账号 | 策略 {pool.strategy} | "
+                    f"健康 {stats.get('ok', 0)} 个 / 积分耗尽冷却中 {stats.get('exhausted', 0)} 个 / "
+                    f"冷却中 {stats.get('cooldown', 0)} 个 / 停用 {stats.get('disabled', 0)} 个\n")
+                for a in pool.accounts.values():
+                    s = a.summary()
+                    st = "有效" if not s["token_expired"] else "已过期"
+                    sys.stderr.write(f"  - {s['name']} [{s['nickname']}] token: {st} | 健康: {s['health']}"
+                                     + (f" | {s['last_error'][:80]}" if s["last_error"] else "") + "\n")
+            else:
+                cm = CredentialManager(af)
+                info = cm.summary()
+                sys.stderr.write(f"账号      : {info.get('nickname')} / {info.get('enterpriseName')}\n")
+                sys.stderr.write(f"token过期 : {'是(将自动刷新)' if info['token_expired'] else '否'}\n")
         except Exception as e:
             sys.stderr.write(f"[警告] 读取凭据失败：{e}\n")
             ok = False
@@ -898,39 +1200,162 @@ def main():
                          "保留原始 system prompt 完整内容（如 Claude Code 的行为指令），"
                          "但审核误拦风险略高于默认压缩模式。")
     ap.add_argument("--skip-check", action="store_true", help="跳过启动预检")
+    ap.add_argument("--verbose", action="store_true",
+                    help="详细日志：记录完整请求/响应体（默认只记一行账单式日志）")
+    ap.add_argument("--ui", action="store_true", default=True,
+                    help="启用 Web 管理面板（默认开启，浏览器访问 / 即可打开）")
+    ap.add_argument("--no-ui", action="store_true", dest="no_ui",
+                    help="关闭 Web 管理面板（纯 API 模式，同原版行为）")
+    ap.add_argument("--prefer", default="", metavar="NAME",
+                    help="优先使用指定名称/昵称的账号（不指定时用登录时间最新的账号）")
+    ap.add_argument("--strategy", default="failover", choices=["fixed", "auto", "failover"],
+                    help="账号路由策略：fixed 固定账号 / auto 轮询 / "
+                         "failover 自动顶上（默认，积分耗尽/限流/鉴权失败自动切换其他账号）")
     args = ap.parse_args()
+    start(
+        host=args.host, port=args.port, api_key=args.api_key,
+        strategy=args.strategy, log_path=args.log,
+        skip_check=args.skip_check, verbose=bool(getattr(args, "verbose", False)),
+        desensitize=args.desensitize, no_compact=args.no_compact,
+        prefer=args.prefer, with_ui=(args.ui and not args.no_ui),
+    )
 
-    CONFIG["api_key"] = args.api_key
-    CONFIG["desensitize"] = args.desensitize
-    CONFIG["no_compact"] = args.no_compact
-    # --log 直接指定文件路径即开启；不传则不记
-    CONFIG["log_path"] = args.log if args.log else os.environ.get("CODEBUDDY2OPENAI_LOG")
+
+# 模块级 server 实例，供 stop() 优雅关闭
+_server = None
+# 每日签到调度器（个人账号签到领积分）
+_checkin_scheduler = None
+
+
+def start(host="127.0.0.1", port=8787, api_key="", strategy="failover",
+          log_path=None, skip_check=True, verbose=False,
+          desensitize=False, no_compact=False, prefer="",
+          with_ui=True):
+    """初始化配置 + 账号池 + UI，并阻塞运行 uvicorn。
+    供命令行 main() 和桌面启动器 app.py 共同调用。"""
+    global _server
+    CONFIG["api_key"] = api_key
+    CONFIG["desensitize"] = desensitize
+    CONFIG["no_compact"] = no_compact
+    CONFIG["verbose"] = verbose
+    CONFIG["host"] = host
+    CONFIG["port"] = port
+    CONFIG["started_at"] = time.time()
+    CONFIG["log_path"] = log_path if log_path else os.environ.get("CODEBUDDY2OPENAI_LOG")
     af = find_auth_file()
     CONFIG["cred"] = CredentialManager(af) if af else None
 
-    if not args.skip_check:
+    try:
+        pool = AccountPool(strategy=strategy)
+        if not prefer and pool.accounts:
+            newest = max(pool.accounts.values(), key=lambda a: a.path.stat().st_mtime)
+            pool.active_id = newest.id
+        if prefer:
+            target = None
+            for a in pool.accounts.values():
+                if prefer in a.name or prefer in (a.summary().get("nickname") or ""):
+                    target = a.id
+                    break
+            if target:
+                pool.active_id = target
+            else:
+                sys.stderr.write(f"[警告] --prefer 未匹配到账号 '{prefer}'\n")
+        CONFIG["pool"] = pool
+    except Exception as e:
+        sys.stderr.write(f"[警告] 账号池初始化失败（回退到单账号模式）：{e}\n")
+
+    if not skip_check:
         preflight()
 
-    sys.stderr.write(f"\n✅ 监听 http://{args.host}:{args.port}（直连后端，原生 function calling）\n")
-    sys.stderr.write("   GET  /v1/models\n")
-    sys.stderr.write("   POST /v1/chat/completions   (原生 tools/tool_calls，支持流式)\n")
-    sys.stderr.write("   POST /v1/responses          (Responses API，Codex CLI 兼容)\n")
-    sys.stderr.write("   POST /v1/messages           (Anthropic API，Claude Code / CC Switch 兼容)\n")
-    sys.stderr.write("   GET  /health\n")
-    if args.api_key:
-        sys.stderr.write("   鉴权已启用（API key 已设置）\n")
-    if CONFIG["log_path"]:
-        sys.stderr.write(f"   日志      : {CONFIG['log_path']}\n")
-    if args.desensitize:
-        mode = "零宽脱敏 + 保留全文" if args.no_compact else "零宽脱敏 + 压缩摘要"
-        sys.stderr.write(f"   脱敏      : 已启用（{mode}）\n")
-    sys.stderr.write("按 Ctrl+C 退出。\n\n")
-
-    # 启动时写一条标记
     _log(f"==== converter 启动 ====")
 
-    uvicorn.run(app, host=args.host, port=args.port, log_level="warning")
+    if with_ui:
+        try:
+            from ui_admin import setup as ui_setup, LOG_BUS
+            ui_setup(app, with_ui=True)
+            LOG_BUS.emit(f"converter 启动 @ {host}:{port}，UI 已开启", level="info")
+
+            @app.on_event("startup")
+            async def _bind_logbus():
+                import asyncio as _asyncio
+                LOG_BUS.bind_loop(_asyncio.get_running_loop())
+        except ImportError:
+            sys.stderr.write("[警告] ui_admin 模块缺失，管理面板不可用（协议端点不受影响）\n")
+        except Exception as e:
+            sys.stderr.write(f"[警告] 管理面板初始化失败：{e}\n")
+
+    # 启动每日签到调度器（个人账号签到领积分；企业账号自动跳过）
+    global _checkin_scheduler
+    try:
+        from billing import CheckinScheduler
+
+        def _emit_log(msg, level="info", **kw):
+            try:
+                from ui_admin import LOG_BUS
+                LOG_BUS.emit(msg, level=level)
+            except Exception:
+                pass
+
+        _checkin_scheduler = CheckinScheduler(
+            pool_getter=lambda: CONFIG.get("pool"),
+            emit=_emit_log,
+        )
+        CONFIG["checkin_scheduler"] = _checkin_scheduler
+        _checkin_scheduler.start()
+        # 首次启动立即同步一次余额（异步线程，不阻塞）
+        threading.Thread(target=_refresh_all_balances, daemon=True).start()
+    except Exception as e:
+        sys.stderr.write(f"[警告] 签到调度器初始化失败：{e}\n")
+
+    cfg = uvicorn.Config(app, host=host, port=port, log_level="warning")
+    _server = uvicorn.Server(cfg)
+    # 若不在主线程（如桌面启动器调用），需手动建 event loop
+    import asyncio as _aio
+    try:
+        _aio.get_running_loop()
+        _server.run()
+    except RuntimeError:
+        loop = _aio.new_event_loop()
+        _aio.set_event_loop(loop)
+        loop.run_until_complete(_server.serve())
+
+
+def stop():
+    """优雅停止服务（供桌面启动器调用）。"""
+    global _server, _checkin_scheduler
+    if _checkin_scheduler is not None:
+        try:
+            _checkin_scheduler.stop()
+        except Exception:
+            pass
+    if _server is not None:
+        _server.should_exit = True
+
+
+def _refresh_all_balances():
+    """后台线程：为账号池中所有账号刷新一次真实余额（个人账号有数据）。"""
+    pool = CONFIG.get("pool")
+    if pool is None:
+        return
+    for acct in list(pool.accounts.values()):
+        try:
+            acct.refresh_real_credit()
+        except Exception:
+            pass
+
+
+def run_checkin_once(force: bool = True) -> dict:
+    """手动触发一轮签到（UI/API 调用）。"""
+    global _checkin_scheduler
+    if _checkin_scheduler is None:
+        return {"error": "签到调度器未初始化"}
+    return _checkin_scheduler.run_once(force=force)
 
 
 if __name__ == "__main__":
+    import sys as _sys
+    # 修正双模块问题：`python converter.py` 时本文件以 __main__ 运行，
+    # 但 account_pool/ui_admin 内部 `import converter` 会重新加载一个副本，
+    # 导致 CONFIG 状态不同步。把 __main__ 注册为 converter，保证单实例共享状态。
+    _sys.modules["converter"] = _sys.modules["__main__"]
     main()

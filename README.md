@@ -23,6 +23,32 @@
 - `POST /v1/messages`
 - `GET /v1/models`
 - `GET /health`
+- 内置 **Web 管理面板**（浏览器访问 `http://127.0.0.1:8787/`）
+
+### Web 管理面板（内置 UI，默认开启）
+
+本项目已内置一个 Web 管理面板，浏览器打开服务地址即可使用，无需额外部署：
+
+| 页面 | 功能 |
+|---|---|
+| 仪表盘 | 服务运行状态、当前账号、Token 过期倒计时、今日请求统计、耗时趋势图 |
+| 账号管理 | **多账号池**：自动扫描本机所有登录态、一键切换账号（无需重启）、有效性检测、手动导入、fixed/auto/failover 路由策略、标记积分耗尽/恢复账号 |
+| 实时日志 | 请求/响应/审核拦截实时推送（WebSocket）、级别过滤、关键字搜索 |
+| 设置 | 脱敏开关、API Key、日志路径、模型列表热更新 |
+| 接入向导 | 一键生成 Codex CLI / CC Switch / 通用客户端配置 |
+
+**新增参数**：
+
+| 参数 | 默认值 | 说明 |
+|---|---|---|
+| `--ui` | 开 | 启用管理面板（浏览器访问 `/`） |
+| `--no-ui` | 关 | 关闭管理面板（纯 API 模式，同原版行为） |
+| `--prefer NAME` | 无 | 优先使用指定名称/昵称的账号（默认选 mtime 最新的账号，而非字典序第一个） |
+| `--strategy` | `failover` | 账号路由策略：`failover` 积分耗尽自动顶上 / `fixed` 固定 / `auto` 轮询 |
+
+**管理 API**：`/api/accounts`（账号池）、`/api/config`（配置）、`/api/logs`（日志）、`/ws/logs`（实时日志 WebSocket）、`/api/status`（服务状态）。
+
+> 多账号提示：本机 auth 目录下若有多个 `*.info`，原版会取字典序第一个（可能是个失效账号导致 401）。使用账号池可在面板里一键切换到有效账号。
 
 它不负责登录，不模拟桌面端，也不替你执行工具。它只做三件事：
 
@@ -209,6 +235,30 @@ uv run converter.py --desensitize --log converter.log
 
 ---
 
+## Web 管理面板（多账号）
+
+服务默认会把浏览器访问 `http://127.0.0.1:8787/` 打开为 Web 管理面板（`--no-ui` 可关闭），支持：
+
+- 查看所有已登录账号（昵称 / token 有效性 / 目录 / **健康状态**）
+- 一键切换当前账号（`fixed` 策略下立即生效）
+- 路由策略切换：
+  - `failover`（默认）：**当前账号积分/额度耗尽、被限流或鉴权失败时，自动标记该账号并切换到下一个可用账号顶上重试**，冷却到期自动恢复参与路由
+  - `fixed`（固定一个账号）或 `auto`（多账号轮询，提升并发）
+- 手动「标记积分耗尽」（立即顶上其他账号）与「恢复账号」（解除冷却/耗尽标记）
+- 启用 / 禁用账号、重命名、手动导入 `.info`
+- 热更新配置（如 `desensitize`），无需重启
+- 实时请求日志与统计
+
+账号池会自动扫描本机所有 `*.info` 登录态。多账号场景建议用 `--prefer 名称` 指定主账号：
+
+```bash
+python3 converter.py --desensitize --prefer "烟逝"
+```
+
+> 提示：桌面端每次新登录都会生成新的 `*.info` 目录，账号池会自动发现并纳入管理，也可在面板里禁用旧账号。
+
+---
+
 ## 常用命令
 
 ### 基本启动
@@ -232,6 +282,10 @@ python3 converter.py --port 9000
 | `--desensitize` | 关 | 压缩运行时提示、去掉 tool description、零宽脱敏高风险关键词 |
 | `--no-compact` | 关 | 配合 `--desensitize` 使用，保留更完整的原始 system prompt |
 | `--skip-check` | 否 | 跳过启动预检 |
+| `--prefer` | 无 | 多账号模式下优先使用指定名称/昵称的账号（默认用登录时间最新的账号） |
+| `--strategy` | `failover` | 账号路由策略：`failover` 积分耗尽自动顶上 / `fixed` 固定 / `auto` 轮询 |
+| `--ui` | 开 | 启用 Web 管理面板，浏览器访问 `/` 即可管理账号、热改配置、看日志 |
+| `--no-ui` | 关 | 关闭 Web 管理面板（纯 API 模式） |
 
 ### curl 示例
 
@@ -369,9 +423,16 @@ workbuddy2api/
 ├── responses_projection.py
 ├── anthropic_adapter.py
 ├── desensitize.py
+├── account_pool.py
+├── ui_admin.py
+├── ui/
+│   ├── index.html
+│   └── favicon.svg
 ├── codex-codebuddy.example.toml
 ├── test_responses_adapter.py
 ├── test_anthropic_adapter.py
+├── test_account_pool.py
+├── test_ui_admin.py
 ├── README.md
 └── LICENSE
 ```
@@ -383,6 +444,9 @@ workbuddy2api/
 - `responses_projection.py`: Codex / agent 请求投影压缩
 - `anthropic_adapter.py`: Anthropic Messages ↔ Chat 适配
 - `desensitize.py`: 运行时文本压缩与零宽脱敏
+- `account_pool.py`: 多账号池，扫描/切换/路由策略/启用禁用
+- `ui_admin.py`: Web 管理面板的后端路由与内存日志总线
+- `ui/`: 管理面板前端页面
 
 ---
 
