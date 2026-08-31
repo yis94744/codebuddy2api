@@ -203,6 +203,12 @@ class CheckinScheduler:
                             "awarded": awarded, "streak": streak, "message": msg})
             if ok or already:
                 self._emit(f"签到 {nickname} {msg}", level="credit")
+                # 签到成功后重新查询真实余额，让面板显示最新积分
+                if ok:
+                    try:
+                        acct.refresh_real_credit()
+                    except Exception:
+                        pass
             else:
                 self._emit(f"签到失败 {nickname} {msg}", level="error")
         return {"skipped": False, "today": today, "results": results}
