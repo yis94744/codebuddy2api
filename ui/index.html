@@ -369,8 +369,7 @@ const app=createApp({
     }
     async function loadAccounts(){
       try{const p=await api('/api/accounts');Object.assign(pool,p);}catch(e){checkErr.value=e.message;}
-    }
-    async function loadConfig(){
+    }    async function loadConfig(){
       try{
         const c=await api('/api/config');
         cfg.port=c.port;cfg.api_key=c.api_key?(localStorage.getItem('wb2api_key')||''):'';cfg.log_path=c.log_path||'';cfg.desensitize=c.desensitize;cfg.no_compact=c.no_compact;cfg.models=[...c.models];
@@ -511,7 +510,7 @@ const app=createApp({
     function fmtExpire(ms){if(!ms)return'-';const d=new Date(ms);const diff=d-new Date();if(diff<0)return '已过期';if(diff<86400000)return d.toLocaleString()+' (明天内)';return d.toLocaleDateString();}
     function expireSoon(a){const ms=a.token_expires_at-Date.now();return ms>0&&ms<3*86400000;}
 
-    onMounted(()=>{loadDashboard();});
+    onMounted(()=>{loadDashboard();self.setInterval(()=>{if(page.value==='dashboard')loadDashboard();else if(page.value==='accounts')loadAccounts();},3000);});
     return {page,status,pool,stats,accounts,activeAcct,apiKeyHint,checkErr,
       logs,logLevel,logQuery,filteredLogs,wsConnected,logBox,onLogScroll,toggleLogs,clearLogs,
       cfg,loadDashboard,loadAccounts,loadConfig,saveConfig,switchAcct,checkAcct,viewAcct,setStrategy,

@@ -118,7 +118,11 @@ class Account:
             return self.real_credit
 
     def add_credit(self, c: float) -> float:
-        """累加一次积分消耗，返回累计值（线程安全）。"""
+        """累加一次积分消耗，返回累计值（线程安全）。
+
+        若已知道真实余额，同时做一次本地即时扣减（供面板实时反映这次消耗）。
+        该值仅为过渡显示，随后会由上游真实查询（refresh_real_credit）校正为绝对真实。
+        """
         try:
             c = float(c or 0)
         except (TypeError, ValueError):
@@ -126,6 +130,9 @@ class Account:
         with self._lock:
             if c > 0:
                 self.credit_spent += c
+                # 本地乐观扣减真实余额，让面板立即响应消耗（真实值在异步刷新后校正）
+                if self.real_credit is not None:
+                    self.real_credit = max(0.0, self.real_credit - c)
             return self.credit_spent
 
     def _mask_token(self) -> str:
@@ -429,6 +436,24 @@ class AccountPool:
         with self._lock:
             acct = self._get(account_id)
             acct.mark_recovered()
+
+    # -- 真实余额实时刷新（节流，让面板反映最新/最真实积分） --------------
+    def schedule_balance_refresh(self, account_id: str, *, force: bool = False,
+                                 min_interval: float = 2.0) -> bool:
+        """节流地调度一次真实余额刷新（后台线程，不阻塞调用方）。
+
+        force=True 忽略节流强制刷新；返回 True 表示已调度，False 表示被节流跳过。
+        用于在每次请求消耗积分后，异步把余额校正为上游绝对真实值。
+        """
+        with self._lock:
+            acct = self.accounts.get(account_id)
+            if acct is None:
+                return False
+            # 同一账号距上次真实查询过近则合并（避免高频请求打爆计费接口）
+            if not force and (time.time() - acct.real_credit_at) < min_interval:
+                return False
+        threading.Thread(target=acct.refresh_real_credit, daemon=True).start()
+        return True
 
     def active(self) -> Optional[Account]:
         with self._lock:

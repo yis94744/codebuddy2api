@@ -561,6 +561,13 @@ def _log_bill(usage: dict, model: str, rid: str = "", account=None,
             spent = account.add_credit(c)
         except Exception:
             spent = 0.0
+        # 消耗积分后，异步把余额校正为上游绝对真实值（本地已即时扣减过渡显示）
+        try:
+            pool = CONFIG.get("pool")
+            if pool is not None:
+                pool.schedule_balance_refresh(getattr(account, "id", ""))
+        except Exception:
+            pass
     name = getattr(account, "name", "") or "?"
     toks = f"{pt}+{ct}={tt}" if tt != "?" else "?"
     line = (f"💰 [{rid}] {model} | tok {toks} | {c:.4f}分"
