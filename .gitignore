@@ -34,6 +34,7 @@ secrets.*
 # ---- 打包产物 ----
 dist/
 build/
+release/
 *.spec
 *.manifest
 
