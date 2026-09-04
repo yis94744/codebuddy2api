@@ -209,9 +209,10 @@ class CredentialManager:
 # ---------------------------------------------------------------------------
 
 DEFAULT_MODELS = [
-    "glm-5.2", "glm-5.1", "glm-5v-turbo",
+    "glm-5.3", "glm-5.3-flash", "glm-5.2", "glm-5.1", "glm-5v-turbo",
     "kimi-k2.7", "kimi-k2.6", "kimi-k2.5",
     "deepseek-v4-pro", "deepseek-v4-flash",
+    "hunyuan-2.0-instruct",
     "minimax-m3-pay", "hy3-preview-agent", "auto",
 ]
 
