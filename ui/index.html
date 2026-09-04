@@ -111,8 +111,6 @@ body{background:var(--bg);color:var(--text);font-family:"Segoe UI","PingFang SC"
       </div>
       <div class="cards">
         <div class="card"><div class="k">运行状态</div><div class="v" :style="{color:(status.online&&!status.authFail)?'var(--ok)':'var(--err)'}">{{status.online?(status.authFail?'未授权':'运行中'):'离线'}}</div><div class="hint">已运行 {{fmtUptime(status.uptime)}}</div></div>
-        <div class="card"><div class="k">今日请求</div><div class="v">{{stats.today_requests}}</div><div class="hint">平均耗时 {{stats.avg_duration}}s</div></div>
-        <div class="card"><div class="k">今日积分消耗</div><div class="v" :style="{color:stats.today_credit>0?'var(--warn)':'var(--text)'}">{{fmtCredit(stats.today_credit)}}</div><div class="hint">按上游回传 credit 聚合 · 24h 内</div></div>
         <div class="card"><div class="k">可用账号</div><div class="v">{{pool.pool_stats?pool.pool_stats.ok:accounts.length}}<span style="font-size:14px;color:var(--text-dim)"> / {{accounts.length}}</span></div><div class="hint">策略 {{strategyLabel(pool.strategy)}} · 冷却中 {{pool.pool_stats?pool.pool_stats.cooldown:0}}</div></div>
         <div class="card"><div class="k">审核拦截</div><div class="v" :style="{color:stats.content_filters>0?'var(--warn)':'var(--text)'}">{{stats.content_filters}}</div><div class="hint">警告 {{stats.warns}} · 错误 {{stats.errors}}</div></div>
       </div>
@@ -314,7 +312,7 @@ const app=createApp({
     const page=ref('dashboard');
     const status=reactive({online:false,authFail:false,host:'',uptime:0,port:8787});
     const pool=reactive({strategy:'failover',active_id:null,accounts:[],search_dirs:[],pool_stats:{}});
-    const stats=reactive({today_requests:0,warns:0,errors:0,content_filters:0,avg_duration:0,today_credit:0});
+    const stats=reactive({warns:0,errors:0,content_filters:0});
     const accounts=computed(()=>pool.accounts);
     const activeAcct=computed(()=>pool.accounts.find(a=>a.id===pool.active_id)||null);
     const apiKeyHint=ref('');
@@ -506,7 +504,6 @@ const app=createApp({
     function copy(t){navigator.clipboard.writeText(t).then(()=>ElementPlus.ElMessage.success('已复制'));}
 
     function fmtUptime(s){if(!s)return'-';const d=Math.floor(s/86400),h=Math.floor(s%86400/3600),m=Math.floor(s%3600/60);return (d?d+'天 ':'')+h+'小时 '+m+'分';}
-    function fmtCredit(c){c=Number(c)||0;return c===0?'0':'≈'+c.toFixed(4).replace(/0+$/,'').replace(/\.$/,'');}
     function fmtExpire(ms){if(!ms)return'-';const d=new Date(ms);const diff=d-new Date();if(diff<0)return '已过期';if(diff<86400000)return d.toLocaleString()+' (明天内)';return d.toLocaleDateString();}
     function expireSoon(a){const ms=a.token_expires_at-Date.now();return ms>0&&ms<3*86400000;}
 
@@ -517,7 +514,7 @@ const app=createApp({
       markExhausted,recoverAcct,healthMeta,strategyLabel,
       detailOpen,detail,checkingId,checkinId,checkinAcct,
       wizard,loadWizard,copy,var_ok,
-      fmtUptime,fmtExpire,expireSoon,fmtCredit,connectLogs};
+      fmtUptime,fmtExpire,expireSoon,connectLogs};
   }
 });
 app.use(ElementPlus);
