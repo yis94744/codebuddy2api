@@ -38,9 +38,14 @@ class Account:
         from converter import CredentialManager  # 延迟导入，避免循环依赖
         self.id = uuid.uuid4().hex[:12]
         self.path = Path(path)
-        self.name = name or self.path.stem
         self.enabled = True
         self.credential = CredentialManager(self.path)
+        # 名字优先级：手动指定 > 登录账号昵称/企业名 > 文件名。
+        # 桌面端当前登录固定写 workbuddy-desktop.info，文件名无法区分账号，故默认取昵称。
+        if name:
+            self.name = name
+        else:
+            self.name = self._auto_name() or self.path.stem
         self.last_used_at: float = 0.0
         self._check_error: Optional[str] = None
         # -- 健康/故障转移状态 -------------------------------------------
@@ -57,6 +62,31 @@ class Account:
         self.real_credit: Optional[float] = None
         self.real_credit_at: float = 0.0
         self.real_credit_note: str = ""
+
+    # -- 名字跟随登录账号 -------------------------------------------------
+    def _auto_name(self) -> Optional[str]:
+        """从登录态里取可读名：昵称 > 企业名 > None（调用方再退回文件名）。"""
+        try:
+            s = self.credential.summary()
+        except Exception:
+            return None
+        return (s.get("nickname") or s.get("enterpriseName") or None) or None
+
+    def refresh_name(self, force: bool = False) -> bool:
+        """名字仍等于文件名（或手动没改过）时，跟随当前登录账号的昵称刷新。
+
+        返回名字是否变化。手动 rename 过的名字（与文件名不同且与昵称不同）不覆盖。
+        """
+        auto = self._auto_name()
+        if not auto:
+            return False
+        stem = self.path.stem
+        if self.name == stem or self.name == auto:
+            if self.name != auto:
+                self.name = auto
+                return True
+            return False
+        return False
 
     # -- 信息 ------------------------------------------------------------
     def summary(self) -> dict:
@@ -281,11 +311,17 @@ class AccountPool:
                     if self.active_id == aid:
                         self.active_id = None
                     del self.accounts[aid]
-            # 新增账号（按文件路径去重）
+            # 新增账号（按文件路径去重）；已有账号名字跟随登录昵称刷新
             for f in found:
-                if not any(a.path == f for a in self.accounts.values()):
+                existing = next((a for a in self.accounts.values() if a.path == f), None)
+                if existing is None:
                     acct = Account(f)
                     self.accounts[acct.id] = acct
+                else:
+                    try:
+                        existing.refresh_name()
+                    except Exception:
+                        pass
             # 确保有 active 账号
             if self.active_id is None or self.active_id not in self.accounts:
                 self.active_id = next(iter(self.accounts.keys()), None)

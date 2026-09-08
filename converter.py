@@ -78,13 +78,18 @@ def auth_dirs() -> list[Path]:
         return [Path(env_dir)]
     home = Path.home()
     plat = sys.platform
+    # CodeBuddy 与 WorkBuddy 是两个独立桌面端，登录态目录同名并列；都扫，不存在的会被跳过
     if plat == "darwin":
-        return [home / "Library" / "Application Support" / "CodeBuddyExtension" / "Data" / "Public" / "auth"]
+        base = home / "Library" / "Application Support"
+        return [base / "CodeBuddyExtension" / "Data" / "Public" / "auth",
+                base / "WorkBuddyExtension" / "Data" / "Public" / "auth"]
     if plat == "win32":
         local = Path(os.environ.get("LOCALAPPDATA", home / "AppData" / "Local"))
-        return [local / "CodeBuddyExtension" / "Data" / "Public" / "auth"]
+        return [local / "CodeBuddyExtension" / "Data" / "Public" / "auth",
+                local / "WorkBuddyExtension" / "Data" / "Public" / "auth"]
     xdg = Path(os.environ.get("XDG_DATA_HOME", home / ".local" / "share"))
-    return [xdg / "CodeBuddyExtension" / "Data" / "Public" / "auth"]
+    return [xdg / "CodeBuddyExtension" / "Data" / "Public" / "auth",
+            xdg / "WorkBuddyExtension" / "Data" / "Public" / "auth"]
 
 
 def find_auth_file() -> Path | None:
