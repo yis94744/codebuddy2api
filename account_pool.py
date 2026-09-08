@@ -44,8 +44,10 @@ class Account:
         # 桌面端当前登录固定写 workbuddy-desktop.info，文件名无法区分账号，故默认取昵称。
         if name:
             self.name = name
+            self.name_manual = True   # 手动指定名，自动刷新不覆盖
         else:
             self.name = self._auto_name() or self.path.stem
+            self.name_manual = False
         self.last_used_at: float = 0.0
         self._check_error: Optional[str] = None
         # -- 健康/故障转移状态 -------------------------------------------
@@ -73,19 +75,20 @@ class Account:
         return (s.get("nickname") or s.get("enterpriseName") or None) or None
 
     def refresh_name(self, force: bool = False) -> bool:
-        """名字仍等于文件名（或手动没改过）时，跟随当前登录账号的昵称刷新。
+        """非手动命名的账号，名字始终跟随当前登录账号的昵称/企业名。
 
-        返回名字是否变化。手动 rename 过的名字（与文件名不同且与昵称不同）不覆盖。
+        桌面端换号登录会覆盖同一个 .info 文件，名字必须跟着文件内容走，
+        否则会停留在上一个账号的昵称上造成误认。手动 rename 过的账号
+        （name_manual=True）不受影响。返回名字是否变化。
         """
         auto = self._auto_name()
         if not auto:
             return False
-        stem = self.path.stem
-        if self.name == stem or self.name == auto:
-            if self.name != auto:
-                self.name = auto
-                return True
+        if getattr(self, "name_manual", False):
             return False
+        if self.name != auto:
+            self.name = auto
+            return True
         return False
 
     # -- 信息 ------------------------------------------------------------
@@ -346,6 +349,7 @@ class AccountPool:
         with self._lock:
             acct = self._get(account_id)
             acct.name = name.strip() or acct.path.stem
+            acct.name_manual = True   # 手动命名，之后自动刷新不覆盖
             return acct.summary()
 
     def set_enabled(self, account_id: str, enabled: bool) -> dict:
