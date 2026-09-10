@@ -3,7 +3,7 @@
 ; 编译: ISCC.exe setup.iss
 
 #define MyAppName "CodeBuddy2API"
-#define MyAppVersion "1.0.0"
+#define MyAppVersion "1.0.1"
 #define MyAppPublisher "yis94744"
 #define MyAppURL "https://github.com/yis94744/codebuddy2api"
 #define MyAppExeName "CodeBuddy2API.exe"
