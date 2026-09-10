@@ -37,6 +37,7 @@ if __name__ == "__main__":
     sys.modules.setdefault("converter", sys.modules["__main__"])
 
 import httpx
+from contextlib import asynccontextmanager
 from fastapi import FastAPI, Header, HTTPException, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 import uvicorn
@@ -67,6 +68,49 @@ from account_pool import AccountPool
 BACKEND = "https://copilot.tencent.com"
 DEFAULT_DOMAIN = "www.codebuddy.cn"
 USER_AGENT = "codebuddy2openai/2.0"
+
+# ---------------------------------------------------------------------------
+# 上游共享连接池
+#
+# 此前每个请求都 httpx.AsyncClient(...) 新建客户端，用完即销毁，连接池完全无法
+# 复用：每次请求都要重做一遍 DNS + TCP + TLS 握手。实测到 copilot.tencent.com
+# 单次握手约 1s，导致首字延迟比直连高出一倍（2.0s vs 1.0s）。
+# 改为进程级单例后连接（含 TLS 会话）跨请求复用，首字延迟与直连持平。
+# ---------------------------------------------------------------------------
+
+# 流式请求超时：读超时放宽到 10 分钟（长回答/深度推理），连接超时 15s
+_STREAM_TIMEOUT = httpx.Timeout(600.0, connect=15.0)
+
+_http_client: Optional[httpx.AsyncClient] = None
+
+
+def get_http_client() -> httpx.AsyncClient:
+    """返回进程级共享的 httpx 客户端（惰性创建，连接池跨请求复用）。"""
+    global _http_client
+    if _http_client is None or _http_client.is_closed:
+        _http_client = httpx.AsyncClient(
+            timeout=httpx.Timeout(300.0, connect=15.0),
+            limits=httpx.Limits(max_connections=128, max_keepalive_connections=64,
+                                keepalive_expiry=90.0),
+        )
+    return _http_client
+
+
+@asynccontextmanager
+async def _upstream_client():
+    """以 async with 语法取用共享连接池客户端（此处不关闭，退出时统一回收）。"""
+    yield get_http_client()
+
+
+async def close_http_client() -> None:
+    """关闭共享连接池（服务退出时调用）。"""
+    global _http_client
+    if _http_client is not None and not _http_client.is_closed:
+        try:
+            await _http_client.aclose()
+        except Exception:
+            pass
+    _http_client = None
 
 # ---------------------------------------------------------------------------
 # 平台相关：定位 auth 目录
@@ -516,8 +560,8 @@ async def _post_chat_once(account, body, rid="", model_name="?"):
     """
     headers = account.credential.get_headers()
     url = f"{BACKEND}/v2/chat/completions"
-    async with httpx.AsyncClient(timeout=300) as c:
-        async with c.stream("POST", url, headers=headers, json=body) as r:
+    c = get_http_client()
+    async with c.stream("POST", url, headers=headers, json=body, timeout=300.0) as r:
             if r.status_code != 200:
                 raw = await r.aread()
                 _log(f"[{rid}] ✗ HTTP {r.status_code} | {model_name} | {_truncate(raw.decode('utf-8','replace'),200)}")
@@ -750,8 +794,8 @@ async def _stream_upstream(account, body: dict,
     while True:
         headers = cur.credential.get_headers()
         try:
-            async with httpx.AsyncClient(timeout=None) as c:
-                async with c.stream("POST", url, headers=headers, json=body) as r:
+            async with _upstream_client() as c:
+                async with c.stream("POST", url, headers=headers, json=body, timeout=_STREAM_TIMEOUT) as r:
                     if r.status_code != 200:
                         err = await r.aread()
                         text = err.decode("utf-8", "replace")
@@ -835,8 +879,8 @@ def _chat_body_desensitize(body: dict, *, force_compact: bool = False) -> dict:
 
 
 async def _post_backend_once(url: str, headers: dict, body: dict) -> tuple[int, bytes]:
-    async with httpx.AsyncClient(timeout=120) as c:
-        async with c.stream("POST", url, headers=headers, json=body) as r:
+    async with _upstream_client() as c:
+        async with c.stream("POST", url, headers=headers, json=body, timeout=_STREAM_TIMEOUT) as r:
             chunks: list[bytes] = []
             async for chunk in r.aiter_bytes():
                 if chunk:
@@ -1097,8 +1141,8 @@ async def _stream_anthropic(account, body: dict,
     while True:
         headers = cur.credential.get_headers()
         try:
-            async with httpx.AsyncClient(timeout=None) as c:
-                async with c.stream("POST", url, headers=headers, json=body) as r:
+            async with _upstream_client() as c:
+                async with c.stream("POST", url, headers=headers, json=body, timeout=_STREAM_TIMEOUT) as r:
                     if r.status_code != 200:
                         err = await r.aread()
                         text = err.decode("utf-8", "replace")
@@ -1351,6 +1395,14 @@ def stop():
             pass
     if _server is not None:
         _server.should_exit = True
+    # 回收共享连接池（尽力而为，失败不影响退出）
+    try:
+        import asyncio as _aio2
+        _loop = _aio2.new_event_loop()
+        _loop.run_until_complete(close_http_client())
+        _loop.close()
+    except Exception:
+        pass
 
 
 def _refresh_all_balances():
