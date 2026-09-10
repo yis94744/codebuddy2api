@@ -78,6 +78,14 @@
 
 ---
 
+## 模型能力表
+
+哪些模型支持**图片输入**、哪些支持**推理档位**（reasoning_effort）、各自实测速度如何 —— 见 [docs/model-capabilities.md](docs/model-capabilities.md)。
+
+配置客户端（DeepSeek Harness / Cherry Studio / 任意 SDK）时请参照该表：**只给真正支持视觉的模型声明 image 输入**，否则客户端放行图片但上游无法处理。
+
+---
+
 ## 3 分钟上手
 
 ### 1. 前置条件
