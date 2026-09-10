@@ -48,8 +48,8 @@ Name: "autostart"; Description: "开机自启动 CodeBuddy2API"; GroupDescriptio
 [Files]
 ; 主程序 exe（onefile，体积较大）
 Source: "{#SourceDir}\CodeBuddy2API.exe"; DestDir: "{app}"; Flags: ignoreversion
-; 依赖的配置文件随包复制一份默认值（用户安装后首启动会自动生成/合并）
-Source: "{#SourceDir}\config.json"; DestDir: "{app}"; Flags: onlyifdoesntexist ignoreversion
+; 不打包 config.json：程序首次启动会在 exe 同目录自动生成默认配置，
+; 随包携带会把打包机的本地配置（api_key 等）带给使用者
 
 [Icons]
 Name: "{group}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"
