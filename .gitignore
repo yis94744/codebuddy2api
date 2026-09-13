@@ -38,6 +38,11 @@ release/
 *.spec
 *.manifest
 
+# ---- 临时打包输出目录（dist 下的 exe 被运行中进程占用时的备用输出口）----
+/_dist_new/
+/_build_new/
+/_spec_new/
+
 # ---- 日志 / 临时文件 / 诊断输出 ----
 *.log
 *.pid
