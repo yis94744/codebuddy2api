@@ -311,6 +311,59 @@ curl -N http://127.0.0.1:8787/v1/chat/completions \
 
 ---
 
+## 打包 exe 与安装包
+
+### 1. 打包成单文件 exe
+
+```bat
+build.bat
+```
+
+产出 `dist\CodeBuddy2API.exe`（onefile、无控制台窗口，并内嵌 WorkBuddy 客户端图标）。
+
+脚本会自动挑选一个装了 PyInstaller 的解释器（优先项目 `.venv`，其次系统 Python）；也可以用 `set PYTHON=<解释器路径>` 显式指定。
+
+打包完成后脚本会**自动跑一次完整性自检**（`dist\CodeBuddy2API.exe --selfcheck`），结果打印到屏幕并写入 `dist\selfcheck.log`。也可以随时手动跑：
+
+```bat
+dist\CodeBuddy2API.exe --selfcheck
+```
+
+自检会逐项确认模块与随包数据是否齐全。**看到任何 `[FAIL]` 就说明打包缺件，别急着发出去。**
+
+> **别动 `build.bat` 里那串 `--collect-*` / `--add-data`。** PyInstaller 的静态分析看不见「动态导入」和「数据文件」，源码跑得好好的、打包后就炸。已经踩过四个：
+>
+> | 缺的东西 | 症状 | 补法 |
+> |---|---|---|
+> | `uvicorn.protocols.http.auto` | 服务起不来 | `--collect-submodules uvicorn` |
+> | `anyio._backends._asyncio` | 每个请求都 500 | `--collect-submodules anyio` |
+> | `certifi` 的 `cacert.pem` | 所有 httpx 请求 `[Errno 2]`，签到直接失败 | `--collect-data certifi` |
+> | `assets/` 目录 | exe 图标正常，但窗口/任务栏退回 tkinter 羽毛图标 | `--add-data "assets;assets"` |
+>
+> 另外运行时还有一道兜底：`ssl_bootstrap.py` 会在 certifi 证书缺失时自动换用其它可用 CA，避免同类问题再次导致全链路失败。
+
+脚本会保留上一版 `dist\config.json`（打包过程会清空 `dist`，脚本会先备份再放回），所以改过的端口 / key 不会在重打包后被重置。
+
+### 2. 生成安装包
+
+需要先装 [Inno Setup 6](https://jrsoftware.org/isdl.php)，然后：
+
+```bat
+ISCC.exe setup.iss
+```
+
+产出 `release\CodeBuddy2API-Setup-<版本>.exe`。
+
+安装包会：
+
+- 把安装程序自身、**桌面与开始菜单快捷方式**、卸载项图标统一换成 `assets\icon.ico`（取自 WorkBuddy 客户端）
+- 默认勾选"创建桌面快捷方式"
+- 不携带 `config.json`，首次启动在 exe 同目录自动生成默认配置
+
+> 换图标只需替换 `assets\icon.ico`，无需改脚本。
+
+---
+
 ## 日志与排障
 
 ### 推荐启动方式
@@ -414,9 +467,11 @@ docker run -d --name workbuddy2api -p 8787:8787 \
 
 ## 模型列表
 
-当前内置默认模型列表：
+当前内置默认模型列表（与 `converter.py` 的 `DEFAULT_MODELS` 一致，共 15 个）：
 
-`glm-5.2`、`glm-5.1`、`glm-5v-turbo`、`kimi-k2.7`、`kimi-k2.6`、`kimi-k2.5`、`deepseek-v4-pro`、`deepseek-v4-flash`、`minimax-m3-pay`、`hy3-preview-agent`、`auto`
+`glm-5.3`、`glm-5.3-flash`、`glm-5.2`、`glm-5.1`、`glm-5v-turbo`、`kimi-k2.7`、`kimi-k2.6`、`kimi-k2.5`、`deepseek-v4.1-flash`、`deepseek-v4-pro`、`deepseek-v4-flash`、`hunyuan-2.0-instruct`、`minimax-m3-pay`、`hy3-preview-agent`、`auto`
+
+其中 **9 个支持图片输入**，完整能力对照见 [docs/model-capabilities.md](docs/model-capabilities.md)。
 
 具体能不能用，取决于你的 WorkBuddy / CodeBuddy 订阅。
 
@@ -432,10 +487,25 @@ workbuddy2api/
 ├── anthropic_adapter.py
 ├── desensitize.py
 ├── account_pool.py
+├── billing.py
+├── cn_importer.py
 ├── ui_admin.py
+├── app.py
+├── ssl_bootstrap.py
+├── selfcheck.py
+├── build.bat
+├── setup.iss
+├── tools/
+│   └── verify_build.py
+├── docs/
+│   └── model-capabilities.md
+├── assets/
+│   ├── icon.ico
+│   └── icon.png
 ├── ui/
 │   ├── index.html
-│   └── favicon.svg
+│   ├── favicon.svg
+│   └── vendor/
 ├── codex-codebuddy.example.toml
 ├── test_responses_adapter.py
 ├── test_anthropic_adapter.py
@@ -453,7 +523,16 @@ workbuddy2api/
 - `anthropic_adapter.py`: Anthropic Messages ↔ Chat 适配
 - `desensitize.py`: 运行时文本压缩与零宽脱敏
 - `account_pool.py`: 多账号池，扫描/切换/路由策略/启用禁用
+- `billing.py`: 上游积分查询与签到
+- `cn_importer.py`: 批量导入国内账号
 - `ui_admin.py`: Web 管理面板的后端路由与内存日志总线
+- `app.py`: Tkinter 桌面启动器（GUI）
+- `ssl_bootstrap.py`: CA 证书定位兜底（打包漏收证书时的第二道防线）
+- `selfcheck.py`: 打包完整性自检，见「打包 exe 与安装包」
+- `build.bat`: PyInstaller 打包脚本
+- `setup.iss`: Inno Setup 安装包脚本
+- `tools/verify_build.py`: 校验 exe 是否内嵌图标 / 可正常启动
+- `assets/`: 应用图标（打包与快捷方式用）
 - `ui/`: 管理面板前端页面
 
 ---

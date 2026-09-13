@@ -6,29 +6,49 @@
 
 ---
 
+## 〇、视觉能力的实测方法（重要）
+
+视觉能力**不能靠模型名或厂商文档判断**，必须实测。本仓库的探针演进过程说明了原因：
+
+| 版本 | 方法 | 暴露的问题 |
+|---|---|---|
+| v1 | 1x1 纯色图，问颜色 | 模型在瞎猜颜色；上游对不支持的图片**静默返回 200**，导致 15/15 全判"支持"——完全失真 |
+| v2 | 方块+对角线图 | 正则匹配到 "geometric shapes" 就判 YES，把明确回答"整张图空白"的模型误判为支持 |
+| v3 | 否认优先判定 | 单次结论不稳定：同一模型时而答对、时而说看不到 |
+| v4 | 3 次多数票 | 把"上游抖动导致的空回答"误判成"不支持视觉"（kimi-k2.7 3 次全空，加测 8 次后却成功描述了特征） |
+| v5 | 加纯文本对照组 | 对照组失效（所有模型纯文本都正常），且仍有模型靠先验"编造"命中特征 |
+| **v6** | **双图交叉验证** | 用两张**反直觉**图（右下角圆 / 上方水平线），要求分别答对各自形状。猜中一张可靠运气，两张都答对则几乎不可能是幻觉 |
+
+**结论：判定"支持视觉"必须要求模型在两张不同的、非典型图片上都答对具体形状与方位**，否则会把"否认看到图"的模型误判为支持。
+
+**上游抖动是常态**：同一模型同一问题，成功与失败可能交替出现（实测 `kimi-k2.7` 6 次中仅 1 次成功，`hunyuan-2.0-instruct` 6 次中 5 次明确否认）。因此**单次调用结果不可作为依据**。
+
+---
+
 ## 一、模型清单
 
 网关默认暴露以下模型（`/v1/models`）：
 
 | 模型 ID | 视觉 | 推理档位 | 备注 |
 |---|:---:|:---:|---|
-| `glm-5.3` | ✗ | ✓ | 旗舰；**不支持图片输入** |
+| `glm-5.3` | ✓ | ✓ | 旗舰 |
 | `glm-5.3-flash` | ✓ | ✓ | 快且支持视觉，推荐日常使用 |
 | `glm-5.2` | ✓ | ✓ | 稳定，支持视觉 |
-| `glm-5.1` | ✗ | ✓ | 不支持图片输入 |
+| `glm-5.1` | ✓ | ✓ | 支持视觉 |
 | `glm-5v-turbo` | ✓ | ✓ | 视觉专用模型（v = vision） |
-| `kimi-k2.7` | ✓ | ✓ | 支持视觉 |
+| `kimi-k2.7` | ✓ | ✓ | 支持视觉，但成功率偏低（实测 6 次中 1 次成功） |
 | `kimi-k2.6` | ✓ | ✓ | 支持视觉 |
 | `kimi-k2.5` | ✓ | ✓ | 支持视觉 |
-| `deepseek-v4.1-flash` | ✓ | ✓ | 新接入；支持视觉 + 推理档位 |
-| `deepseek-v4-pro` | ✗ | ✓ | 速度较慢（约 46 tok/s） |
+| `deepseek-v4.1-flash` | ✓ | ✓ | 支持视觉 + 推理档位，首选 |
+| `deepseek-v4-pro` | ✓ | ✓ | 支持视觉；速度较慢（约 46 tok/s） |
 | `deepseek-v4-flash` | ✓ | ✓ | 支持视觉 |
 | `hunyuan-2.0-instruct` | ✗ | ✗ | 明确提示"请切换至多模态模型" |
-| `minimax-m3-pay` | ✗ | ✓ | 不支持图片输入 |
-| `hy3-preview-agent` | ✗ | ✗ | 预览版，行为不稳定 |
+| `minimax-m3-pay` | ✓ | ✓ | 支持视觉 |
+| `hy3-preview-agent` | ✓ | ✗ | 预览版；v6 双图验证通过，但整体行为不稳定 |
 | `auto` | ✓ | ✓ | 自动路由，实测支持视觉 |
 
-**统计**：15 个模型中，**8 个支持视觉**（glm-5.3-flash、glm-5.2、glm-5v-turbo、kimi-k2.7/2.6/2.5、deepseek-v4.1-flash、deepseek-v4-flash、auto）。
+> **注**：上表的视觉列以 v6 双图交叉验证为准。`hunyuan-2.0-instruct` 多次明确回答"无法查看图片"，判定为不支持；`hy3-preview-agent` 在 v6 中也通过（两图均 shape=4/4），故一并声明 `image`。
+
 
 ---
 
@@ -76,20 +96,23 @@
 
 ### DeepSeek Harness（`~/.dsh/settings.yaml`）
 
+下面是最小可用骨架。**完整可用的参考配置**见本机 `~/.dsh/settings.yaml`（已把 14 个视觉模型全部声明了 `image`）。
+
+> ⚠️ **别手改 `~/.dsh/settings.yaml`。** 该文件是 flow 风格（大括号）、且 **DSH 会重写它**——实测 2026-09-12 14:06 写入的视觉声明，在 14:12 DSH 重写后被整段抹掉。请用 `python tools/apply_vision_config.py --write` 生成（自带备份 + YAML 自检 + 视觉清单断言）。写入后若发现字段又没了，说明 DSH 侧会覆盖，需要在 DSH 界面内配置而非改文件。
+
 ```yaml
 llm-pi-ai:
   providers:
-    codebuddy:
-      displayName: 积分
-      apiKeyEnv: CODEBUDDY_API_KEY
+    cc:
+      displayName: cc
+      apiKeyEnv: CC_API_KEY
       api: openai-completions
-      baseURL: http://127.0.0.1:8000/v1
-      compat:
-        supportsDeveloperRole: false
+      baseURL: http://127.0.0.1:8787/v1
       models:
-        # 支持视觉 + 推理档位的模型
+        # 支持视觉 + 推理档位的模型：input 必须声明 image
         - id: glm-5.3-flash
-          input: [text, image]
+          name: glm-5.3-flash
+          input: [ text, image ]
           reasoningEfforts:
             low: low
             medium: medium
@@ -98,13 +121,24 @@ llm-pi-ai:
             max: max
         # 纯文本模型：不声明 image，客户端会在发送前拦截图片请求
         - id: glm-5.3
+          name: glm-5.3
           reasoningEfforts:
             low: low
             medium: medium
             high: high
             xhigh: xhigh
             max: max
+agent-default-model:
+  provider: cc
+  model: deepseek-v4.1-flash
+  reasoningEffort: max
 ```
+
+**需要声明 `input: [ text, image ]` 的完整清单**（15 个模型中的 14 个，与 `tools/apply_vision_config.py` 的 `VISION_MODELS` 常量保持一致）：
+
+`glm-5.3`、`glm-5.3-flash`、`glm-5.2`、`glm-5.1`、`glm-5v-turbo`、`kimi-k2.7`、`kimi-k2.6`、`kimi-k2.5`、`deepseek-v4.1-flash`、`deepseek-v4-pro`、`deepseek-v4-flash`、`minimax-m3-pay`、`hy3-preview-agent`、`auto`
+
+只有 1 个（`hunyuan-2.0-instruct`）**不要**声明 `image`。
 
 **关键说明**：
 
@@ -121,7 +155,7 @@ llm-pi-ai:
 ```python
 from openai import OpenAI
 
-client = OpenAI(base_url="http://127.0.0.1:8000/v1", api_key="<你的 api_key>")
+client = OpenAI(base_url="http://127.0.0.1:8787/v1", api_key="<你的 api_key>")
 
 resp = client.chat.completions.create(
     model="deepseek-v4.1-flash",

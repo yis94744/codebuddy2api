@@ -23,6 +23,7 @@ from pathlib import Path
 from typing import Optional
 
 import httpx
+import netenv
 
 # 各错误类别的冷却时长（秒）。冷却期内的账号不参与路由，到期自动恢复。
 COOLDOWN_QUOTA = 600     # 积分/额度耗尽：10 分钟（每日额度场景足够让额度刷新后自动顶上）
@@ -204,7 +205,7 @@ class Account:
             body = {"model": "auto",
                     "messages": [{"role": "user", "content": "ping"}],
                     "stream": True, "max_tokens": 1}
-            with httpx.Client(timeout=30) as c:
+            with netenv.client(30) as c:
                 r = c.post(f"{BACKEND}/v2/chat/completions", headers=headers, json=body)
             if r.status_code == 200:
                 self._check_error = None

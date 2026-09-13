@@ -3,13 +3,17 @@
 ; 编译: ISCC.exe setup.iss
 
 #define MyAppName "CodeBuddy2API"
-#define MyAppVersion "1.0.1"
+#define MyAppVersion "1.0.2"
 #define MyAppPublisher "yis94744"
 #define MyAppURL "https://github.com/yis94744/codebuddy2api"
 #define MyAppExeName "CodeBuddy2API.exe"
 
 ; 源 exe 所在目录（PyInstaller 输出目录）
 #define SourceDir "dist"
+
+; 应用图标（取自 WorkBuddy 客户端，随包分发）
+; 同时用于：安装程序自身图标、快捷方式图标、卸载项图标
+#define MyAppIcon "assets\icon.ico"
 
 [Setup]
 ; 安装程序自身信息
@@ -24,6 +28,8 @@ DefaultDirName={autopf}\{#MyAppName}
 DefaultGroupName={#MyAppName}
 AllowNoIcons=yes
 LicenseFile=LICENSE.txt
+; 安装程序自身的图标（安装包 exe、控制面板"程序和功能"里显示的都是它）
+SetupIconFile={#MyAppIcon}
 OutputDir=release
 OutputBaseFilename=CodeBuddy2API-Setup-{#MyAppVersion}
 Compression=lzma2/max
@@ -33,28 +39,34 @@ WizardStyle=modern
 ArchitecturesInstallIn64BitMode=x64compatible
 ArchitecturesAllowed=x64compatible
 UninstallDisplayName={#MyAppName}
-UninstallDisplayIcon={app}\{#MyAppExeName}
+; 卸载项图标同样用客户端图标
+UninstallDisplayIcon={app}\icon.ico
 ; 默认安装
 PrivilegesRequiredOverridesAllowed=dialog
 
 [Languages]
-Name: "chs"; MessagesFile: "compiler:Languages\ChineseSimplified.isl"
+; 简体中文语言文件随仓库携带（lang\），不依赖本机 Inno Setup 是否装了非官方翻译包
+Name: "chs"; MessagesFile: "lang\ChineseSimplified.isl"
 Name: "en"; MessagesFile: "compiler:Default.isl"
 
 [Tasks]
-Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{cm:AdditionalIcons}"; Flags: unchecked
+; 桌面图标默认勾选（图标已换成 WorkBuddy 客户端图标）；取消勾选可装成纯服务
+Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{cm:AdditionalIcons}"
 Name: "autostart"; Description: "开机自启动 CodeBuddy2API"; GroupDescription: "附加任务:"; Flags: unchecked
 
 [Files]
 ; 主程序 exe（onefile，体积较大）
-Source: "{#SourceDir}\CodeBuddy2API.exe"; DestDir: "{app}"; Flags: ignoreversion
+Source: "{#SourceDir}\{#MyAppExeName}"; DestDir: "{app}"; Flags: ignoreversion
+; 应用图标：快捷方式与卸载项都指向它，因此即使 exe 内嵌图标被改也不会影响显示
+Source: "{#MyAppIcon}"; DestDir: "{app}"; DestName: "icon.ico"; Flags: ignoreversion
 ; 不打包 config.json：程序首次启动会在 exe 同目录自动生成默认配置，
 ; 随包携带会把打包机的本地配置（api_key 等）带给使用者
 
 [Icons]
-Name: "{group}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"
-Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; Tasks: desktopicon
-Name: "{group}\卸载 {#MyAppName}"; Filename: "{uninstallexe}"
+; IconFilename 指向随包安装的 icon.ico —— 桌面图标即 WorkBuddy 客户端图标
+Name: "{group}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; IconFilename: "{app}\icon.ico"
+Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; IconFilename: "{app}\icon.ico"; Tasks: desktopicon
+Name: "{group}\卸载 {#MyAppName}"; Filename: "{uninstallexe}"; IconFilename: "{app}\icon.ico"
 
 [Run]
 ; 安装完成后可选立即启动

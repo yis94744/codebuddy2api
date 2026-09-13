@@ -53,3 +53,13 @@ nohup.out
 .DS_Store
 Thumbs.db
 desktop.ini
+
+# ---- 一次性探针/调试脚本（本地排查用，不进版本库）----
+/_ico_probe.py
+/_logstat.py
+/_smoke_exe.py
+/_ui_test.py
+/_vision_probe*.py
+/_vision_result*.json
+/_icon_preview.png
+*.bak

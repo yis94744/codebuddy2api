@@ -36,6 +36,20 @@ from typing import Optional
 if __name__ == "__main__":
     sys.modules.setdefault("converter", sys.modules["__main__"])
 
+# CA 证书兜底：必须在 httpx 首次建连之前生效。打包漏收 certifi 的
+# cacert.pem 时，这里会自动换用其它可用证书，避免所有上游请求 Errno 2。
+try:
+    import ssl_bootstrap
+    ssl_bootstrap.install()
+except Exception:
+    pass
+
+# 代理策略兜底：默认直连，并抹掉继承来的 HTTP_PROXY/HTTPS_PROXY。
+# 宿主机（IDE / 启动器 / 沙箱）环境里常残留却已失效的代理端口，
+# 会让所有出网请求报 [WinError 10061] 目标计算机积极拒绝。
+import netenv
+netenv.trust_env()  # 预热缓存并清理环境代理变量
+
 import httpx
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, Header, HTTPException, Request
@@ -88,7 +102,7 @@ def get_http_client() -> httpx.AsyncClient:
     """返回进程级共享的 httpx 客户端（惰性创建，连接池跨请求复用）。"""
     global _http_client
     if _http_client is None or _http_client.is_closed:
-        _http_client = httpx.AsyncClient(
+        _http_client = netenv.aclient(
             timeout=httpx.Timeout(300.0, connect=15.0),
             limits=httpx.Limits(max_connections=128, max_keepalive_connections=64,
                                 keepalive_expiry=90.0),
@@ -192,7 +206,7 @@ class CredentialManager:
         headers["X-Auth-Refresh-Source"] = "plugin"
         url = f"{BACKEND}/v2/plugin/auth/token/refresh"
         try:
-            with httpx.Client(timeout=15) as c:
+            with netenv.client(15) as c:
                 r = c.post(url, headers=headers, json={})
             data = r.json()
         except Exception as e:
@@ -1240,12 +1254,38 @@ def preflight() -> bool:
     return ok
 
 
+def _config_json_path() -> Path:
+    """定位 config.json：打包版在 exe 同目录，源码版在脚本同目录。"""
+    if getattr(sys, "frozen", False):
+        return Path(sys.executable).resolve().parent / "config.json"
+    return Path(__file__).resolve().parent / "config.json"
+
+
+def _default_api_key() -> str:
+    """--api-key 的默认值：环境变量优先，其次读同目录 config.json。
+
+    原实现只认环境变量 CODEBUDDY2OPENAI_KEY，于是 start-server.bat
+    （不带 --api-key）会以空 key 启动 = **完全不校验鉴权**，与面板 / GUI
+    启动器读的 config.json 不一致——表现为「走 GUI 有鉴权、走 bat 没鉴权」。
+    """
+    env = os.environ.get("CODEBUDDY2OPENAI_KEY", "")
+    if env:
+        return env
+    try:
+        with open(_config_json_path(), "r", encoding="utf-8") as f:
+            return str(json.load(f).get("api_key") or "")
+    except Exception:
+        return ""
+
+
 def main():
     ap = argparse.ArgumentParser(description="CodeBuddy -> OpenAI 兼容转换器（直连后端）")
     ap.add_argument("--host", default="127.0.0.1")
     ap.add_argument("--port", type=int, default=8787)
-    ap.add_argument("--api-key", default=os.environ.get("CODEBUDDY2OPENAI_KEY", ""),
-                    help="可选：要求客户端携带的 API key（默认不校验）")
+    ap.add_argument("--api-key", default=_default_api_key(),
+                    help="可选：要求客户端携带的 API key。默认为环境变量 "
+                         "CODEBUDDY2OPENAI_KEY，其次读同目录 config.json；"
+                         "两者都没有时为空 = 不校验鉴权。")
     ap.add_argument("--log", default=None, metavar="PATH",
                     help="开启日志并写到该文件（如 --log converter.log 或 --log /tmp/cb.log）。"
                          "不传则不记日志。")

@@ -149,7 +149,9 @@ body{background:var(--bg);color:var(--text);font-family:"Segoe UI","PingFang SC"
             <el-option label="固定账号" value="fixed"></el-option>
             <el-option label="轮询(auto)" value="auto"></el-option>
           </el-select>
-          <el-button type="primary" plain size="small" @click="loadAccounts()">刷新</el-button>
+          <el-button type="primary" plain size="small" :loading="scanning" @click="scanAccounts()">
+            {{scanning?'扫描中…':'刷新账号'}}
+          </el-button>
         </div>
       </div>
       <div class="panel">
@@ -341,6 +343,7 @@ const app=createApp({
     const detailOpen=ref(false);const detail=ref(null);
     const checkingId=ref('');
     const checkinId=ref('');
+    const scanning=ref(false);
 
     async function api(path,opt={}){
       const h=opt.headers||{};
@@ -367,7 +370,27 @@ const app=createApp({
     }
     async function loadAccounts(){
       try{const p=await api('/api/accounts');Object.assign(pool,p);}catch(e){checkErr.value=e.message;}
-    }    async function loadConfig(){
+    }
+    // 扫描 auth 目录发现新登录的账号 / 清掉失效账号。桌面端新登录后无需重启服务。
+    async function scanAccounts(){
+      if(scanning.value)return;
+      scanning.value=true;
+      try{
+        const p=await api('/api/accounts/scan',{method:'POST'});
+        Object.assign(pool,p);
+        const added=p.added||[];
+        if(added.length){
+          ElementPlus.ElMessage.success('发现 '+added.length+' 个新账号：'+added.join('、'));
+        }else if(p.removed){
+          ElementPlus.ElMessage.info('已移除 '+p.removed+' 个失效账号（当前 '+(p.accounts||[]).length+' 个）');
+        }else{
+          ElementPlus.ElMessage.info('扫描完成，未发现新账号（当前 '+(p.accounts||[]).length+' 个）');
+        }
+        loadDashboard();
+      }catch(e){ElementPlus.ElMessage.error('扫描失败：'+e.message);}
+      finally{scanning.value=false;}
+    }
+    async function loadConfig(){
       try{
         const c=await api('/api/config');
         cfg.port=c.port;cfg.api_key=c.api_key?(localStorage.getItem('wb2api_key')||''):'';cfg.log_path=c.log_path||'';cfg.desensitize=c.desensitize;cfg.no_compact=c.no_compact;cfg.models=[...c.models];
@@ -510,7 +533,7 @@ const app=createApp({
     onMounted(()=>{loadDashboard();self.setInterval(()=>{if(page.value==='dashboard')loadDashboard();else if(page.value==='accounts')loadAccounts();},3000);});
     return {page,status,pool,stats,accounts,activeAcct,apiKeyHint,checkErr,
       logs,logLevel,logQuery,filteredLogs,wsConnected,logBox,onLogScroll,toggleLogs,clearLogs,
-      cfg,loadDashboard,loadAccounts,loadConfig,saveConfig,switchAcct,checkAcct,viewAcct,setStrategy,
+      cfg,loadDashboard,loadAccounts,scanAccounts,scanning,loadConfig,saveConfig,switchAcct,checkAcct,viewAcct,setStrategy,
       markExhausted,recoverAcct,healthMeta,strategyLabel,
       detailOpen,detail,checkingId,checkinId,checkinAcct,
       wizard,loadWizard,copy,var_ok,

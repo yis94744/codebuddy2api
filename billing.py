@@ -20,6 +20,10 @@ from typing import Any, Dict, Optional, Tuple
 
 import httpx
 
+# 代理策略：默认直连，避免继承宿主环境里指向不存在代理端口的
+# HTTP_PROXY/HTTPS_PROXY（症状：[WinError 10061] 目标计算机积极拒绝）。
+import netenv
+
 log = logging.getLogger("billing")
 
 BEIJING_TZ = timezone(timedelta(hours=8))
@@ -61,7 +65,7 @@ def query_balance(credential) -> Tuple[Optional[float], str]:
     """
     try:
         headers = build_headers(credential)
-        with httpx.Client(timeout=15) as c:
+        with netenv.client(15) as c:
             r = c.post(ENDPOINT_RESOURCE, headers=headers, json=RESOURCE_BODY)
         if r.status_code >= 400:
             return None, f"查询积分失败 (HTTP {r.status_code})"
@@ -97,7 +101,7 @@ def daily_checkin(credential) -> Tuple[bool, bool, int, int, str]:
     """
     try:
         headers = build_headers(credential)
-        with httpx.Client(timeout=15) as c:
+        with netenv.client(15) as c:
             r = c.post(ENDPOINT_CHECKIN, headers=headers, json={})
         body = r.text
         status = r.status_code

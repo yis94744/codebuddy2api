@@ -164,8 +164,28 @@ def list_accounts(authorization: Optional[str] = Header(default=None),
 @router.post("/accounts/scan")
 def scan_accounts(authorization: Optional[str] = Header(default=None),
                   x_api_key: Optional[str] = Header(default=None, alias="X-Api-Key")):
+    """重新扫描 auth 目录，发现新登录的账号、移除已失效的账号。
+
+    桌面端每次新登录都会生成一个新的 *.info（或覆盖 workbuddy-desktop.info），
+    界面上点「刷新」即调用本接口，无需重启服务。
+    """
     _check_admin_auth(authorization, x_api_key)
-    return _get_pool().scan()
+    pool = _get_pool()
+    before = set(pool.accounts.keys())
+    result = pool.scan()
+    after = set(pool.accounts.keys())
+    added = [a["name"] for a in result["accounts"] if a["id"] in (after - before)]
+    removed = len(before - after)
+    if added or removed:
+        parts = []
+        if added:
+            parts.append("新增 " + "、".join(added))
+        if removed:
+            parts.append(f"移除 {removed} 个失效账号")
+        LOG_BUS.emit(f"账号扫描：{'；'.join(parts)}（当前 {len(after)} 个）",
+                     level="info")
+    return {**result, "added": added, "removed": removed}
+
 
 
 @router.post("/accounts/import")

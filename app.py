@@ -13,6 +13,41 @@ import time
 import urllib.request
 import webbrowser
 
+# CA 证书兜底：必须在任何 httpx.Client 构造之前完成。
+# 打包漏收 certifi 的 cacert.pem 时，这里会自动换用其它可用证书，
+# 否则所有 httpx 请求都会以 Errno 2 失败（详见 ssl_bootstrap 模块注释）。
+try:
+    import ssl_bootstrap
+    ssl_bootstrap.install()
+except Exception:
+    pass
+
+
+def _run_selfcheck():
+    """打包自检入口：结果写 selfcheck.log。
+
+    放在 customtkinter 导入之前，这样即使 GUI 依赖本身没打进包，
+    自检也能跑完并落盘。--noconsole 模式下 stdout 是黑洞，所以写文件。
+    """
+    base = (os.path.dirname(sys.executable) if getattr(sys, "frozen", False)
+            else os.path.dirname(os.path.abspath(__file__)))
+    try:
+        import selfcheck
+        return selfcheck.main()
+    except Exception:
+        import traceback as _tb
+        try:
+            with open(os.path.join(base, "selfcheck.log"), "w",
+                      encoding="utf-8") as f:
+                f.write("selfcheck 自身异常:\n" + _tb.format_exc())
+        except Exception:
+            pass
+        return 2
+
+
+if "--selfcheck" in sys.argv:
+    raise SystemExit(_run_selfcheck())
+
 import customtkinter as ctk
 
 # PyInstaller 打包后 __file__ 指向临时解压目录，配置文件须放 exe 所在目录
@@ -20,15 +55,67 @@ if getattr(sys, "frozen", False):
     APP_DIR = os.path.dirname(sys.executable)
 else:
     APP_DIR = os.path.dirname(os.path.abspath(__file__))
+# 允许用 CB2A_APPDIR 指定配置目录（多实例并行/测试时用，避免互相抢端口）
+if os.environ.get("CB2A_APPDIR"):
+    APP_DIR = os.environ["CB2A_APPDIR"]
 CONFIG_PATH = os.path.join(APP_DIR, "config.json")
 LOG_PATH = os.path.join(APP_DIR, "server.log")
+
+
+def asset_path(name):
+    """定位随包资源。PyInstaller onefile 下资源解压到 sys._MEIPASS。"""
+    for base in (getattr(sys, "_MEIPASS", None), APP_DIR,
+                 os.path.dirname(os.path.abspath(__file__))):
+        if not base:
+            continue
+        p = os.path.join(base, "assets", name)
+        if os.path.exists(p):
+            return p
+    return None
+
+
+def set_window_icon(root):
+    """设置窗口/任务栏图标。
+
+    PyInstaller 的 --icon 只改 exe 文件本身的图标资源，**不会**改运行时窗口
+    图标——tkinter 默认显示自带的羽毛图标。之前桌面快捷方式图标对了、但
+    任务栏和标题栏还是羽毛，就是这个原因。这里显式加载 assets/icon.ico。
+    """
+    ico = asset_path("icon.ico")
+    if not ico:
+        return False
+    # 注意：必须用位置参数 iconbitmap(path) 才会作用于**本窗口**。
+    # 写成 iconbitmap(default=path) 只是设置子窗口的默认图标，主窗口
+    # 任务栏图标不会变——这是很容易踩的坑。
+    try:
+        root.iconbitmap(ico)
+        # 再设一次默认值，让后续弹出的 Toplevel（消息框等）继承同一图标
+        try:
+            root.iconbitmap(default=ico)
+        except Exception:
+            pass
+        return True
+    except Exception:
+        pass
+    # 兜底：iconbitmap 对非标准 ICO 可能失败，改用 PhotoImage
+    try:
+        png = asset_path("icon.png")
+        if png:
+            import tkinter as tk
+            img = tk.PhotoImage(file=png)
+            root.iconphoto(True, img)
+            root._icon_ref = img      # 防止被 GC 回收导致图标消失
+            return True
+    except Exception:
+        pass
+    return False
 
 # 单实例互斥：Windows 全局 Mutex 名（固定字符串，跨实例识别）
 MUTEX_NAME = "Global\\CodeBuddy2API_RunMutex_8f3a"
 
 DEFAULTS = {
     "host": "127.0.0.1",
-    "port": 8000,
+    "port": 8787,
     "api_key": "sk-cb2a-local",
     "strategy": "failover",
 }
@@ -65,6 +152,8 @@ class App:
         self._thread = None
         self.q = queue.Queue()
         self.stop_evt = threading.Event()
+        self._refresh_evt = threading.Event()
+        self._refresh_flash_until = 0.0
         self.seen = set()
         self._build()
         self._start_service()
@@ -75,6 +164,7 @@ class App:
         self.root.title("CodeBuddy2API · 积分池网关")
         self.root.geometry("480x680")
         self.root.minsize(420, 600)
+        set_window_icon(self.root)
 
         # 主容器
         self.root.grid_columnconfigure(0, weight=1)
@@ -142,7 +232,7 @@ class App:
         # ---- 按钮 ----
         btns = ctk.CTkFrame(self.root, fg_color="transparent")
         btns.grid(row=4, column=0, sticky="ew", padx=16, pady=(0, 16))
-        btns.grid_columnconfigure((0, 1, 2), weight=1)
+        btns.grid_columnconfigure((0, 1, 2, 3), weight=1)
         self.btn_toggle = ctk.CTkButton(
             btns, text="停止服务", command=self._on_toggle,
             fg_color="#ff453a", hover_color="#cc3a30", corner_radius=8,
@@ -152,15 +242,20 @@ class App:
             btns, text="管理面板", command=self._open_ui,
             corner_radius=8, font=ctk.CTkFont(size=12))
         self.btn_ui.grid(row=0, column=1, sticky="ew", padx=4, pady=(0, 4))
+        self.btn_refresh = ctk.CTkButton(
+            btns, text="↻ 刷新", command=self._refresh_now,
+            corner_radius=8, font=ctk.CTkFont(size=12),
+            fg_color="#2c6e49", hover_color="#22553a")
+        self.btn_refresh.grid(row=0, column=2, sticky="ew", padx=4, pady=(0, 4))
         self.btn_copy = ctk.CTkButton(
             btns, text="复制配置", command=self._copy,
             corner_radius=8, font=ctk.CTkFont(size=12))
-        self.btn_copy.grid(row=0, column=2, sticky="ew", padx=(4, 0), pady=(0, 4))
+        self.btn_copy.grid(row=0, column=3, sticky="ew", padx=(4, 0), pady=(0, 4))
         self.btn_checkin = ctk.CTkButton(
             btns, text="🎁 立即签到", command=self._checkin_now,
             fg_color="#3a6f3a", hover_color="#2d5a2d", corner_radius=8,
             font=ctk.CTkFont(size=12))
-        self.btn_checkin.grid(row=1, column=0, columnspan=3, sticky="ew", padx=0)
+        self.btn_checkin.grid(row=1, column=0, columnspan=4, sticky="ew", padx=0)
 
     # -- 服务生命周期（进程内启动，适配 PyInstaller 打包） ----------
     def _start_service(self):
@@ -201,6 +296,23 @@ class App:
 
     def _open_ui(self):
         webbrowser.open(self.base + "/")
+
+    def _refresh_now(self):
+        """立即刷新界面数据，不用等轮询周期（不改动服务进程）。
+
+        只触发轮询线程立刻再跑一轮；服务本身不动，所以不会中断正在处理的请求。
+        """
+        self.btn_refresh.configure(text="刷新中…", state="disabled")
+        # 立刻给出可见反馈，并立刻用闪烁副本覆盖 1 秒的轮询文案；
+        # 不依赖轮询成功与否，否则后端异常时按钮像是没反应。
+        stamp = time.strftime("%H:%M:%S")
+        self._refresh_flash_until = time.time() + 3.0
+        self.lbl_sub.configure(text="✔ 已刷新 · " + stamp)
+        self._refresh_evt.set()
+        self.root.after(1200, self._refresh_done)
+
+    def _refresh_done(self):
+        self.btn_refresh.configure(text="↻ 刷新", state="normal")
 
     def _copy(self):
         txt = ("Base URL : %s/v1\nAPI Key  : %s\n"
@@ -255,6 +367,10 @@ class App:
                 self.q.put(("ok", alive, st, accts, stats, logs, bill))
             except Exception:
                 self.q.put(("wait" if alive else "down",))
+            # 手动刷新：立即进入下一轮，而不是等满 1 秒
+            if self._refresh_evt.is_set():
+                self._refresh_evt.clear()
+                continue
             self.stop_evt.wait(1.0)
         # 线程退出前确保服务已停
         try:
@@ -322,6 +438,9 @@ class App:
             lr = bill.get("last_run") or ""
             if lr:
                 sub += " · 每日签到 %s" % lr
+        # 手动刷新的反馈要压住轮询文案，否则提示会在 1 秒内被覆盖掉
+        if time.time() < getattr(self, "_refresh_flash_until", 0):
+            sub = "✔ 已刷新 · " + time.strftime("%H:%M:%S")
         self.lbl_sub.configure(text=sub)
         self.btn_toggle.configure(text="停止服务")
         ps = (accts or {}).get("pool_stats", {}) or {}
@@ -404,12 +523,33 @@ def main():
     mutex = None
     try:
         import ctypes
-        mutex = ctypes.windll.kernel32.CreateMutexW(None, False, MUTEX_NAME)
-        if ctypes.windll.kernel32.GetLastError() == 183:  # ERROR_ALREADY_EXISTS
-            ctypes.windll.user32.MessageBoxW(
-                0, "CodeBuddy2API 已在运行中。\n请查看任务栏或系统托盘中的现有窗口。",
-                "已在运行", 0x40)
-            return
+        # 注意：必须用 use_last_error=True + ctypes.get_last_error() 取错误码。
+        # 默认的 ctypes.windll 不保存线程 last-error，CreateMutexW 与 GetLastError
+        # 之间 ctypes 自身的调用会把错误码冲掉，单实例判断可能被误判成
+        # 「已在运行」——表现为窗口一闪即退、连崩溃日志都没有。
+        k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        mutex = k32.CreateMutexW(None, False, MUTEX_NAME)
+        if mutex and ctypes.get_last_error() == 183:  # ERROR_ALREADY_EXISTS
+            # 双重校验：只有端口确实被占用才认为是真的已有实例在跑，
+            # 避免残留互斥体导致启动被静默拦下。
+            _port = int(DEFAULTS["port"])
+            try:
+                with open(CONFIG_PATH, "r", encoding="utf-8") as _f:
+                    _port = int(json.load(_f).get("port", _port))
+            except Exception:
+                pass
+            _busy = False
+            try:
+                import socket as _sk
+                with _sk.create_connection(("127.0.0.1", _port), timeout=1):
+                    _busy = True
+            except Exception:
+                _busy = False
+            if _busy:
+                ctypes.windll.user32.MessageBoxW(
+                    0, "CodeBuddy2API 已在运行中。\n请查看任务栏或系统托盘中的现有窗口。",
+                    "已在运行", 0x40)
+                return
     except Exception:
         pass  # 非 Windows 或创建失败时退化为多实例，不强求
     try:
