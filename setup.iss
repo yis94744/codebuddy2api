@@ -3,13 +3,16 @@
 ; 编译: ISCC.exe setup.iss
 
 #define MyAppName "CodeBuddy2API"
-#define MyAppVersion "1.0.2"
+#define MyAppVersion "1.0.3"
 #define MyAppPublisher "yis94744"
 #define MyAppURL "https://github.com/yis94744/codebuddy2api"
 #define MyAppExeName "CodeBuddy2API.exe"
 
 ; 源 exe 所在目录（PyInstaller 输出目录）
+; 可用 ISCC /DSourceDir=<目录> 覆盖（例如产物在临时目录、或 dist 里的 exe 正被运行中的进程占用时）
+#ifndef SourceDir
 #define SourceDir "dist"
+#endif
 
 ; 应用图标（取自 WorkBuddy 客户端，随包分发）
 ; 同时用于：安装程序自身图标、快捷方式图标、卸载项图标

@@ -116,7 +116,7 @@ MUTEX_NAME = "Global\\CodeBuddy2API_RunMutex_8f3a"
 DEFAULTS = {
     "host": "127.0.0.1",
     "port": 8787,
-    "api_key": "sk-cb2a-local",
+    "api_key": "123456",
     "strategy": "failover",
 }
 
