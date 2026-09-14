@@ -488,6 +488,40 @@ def billing_refresh(authorization: Optional[str] = Header(default=None),
     return {"ok": True, "message": "余额刷新已触发"}
 
 
+# -- 养虾活动（成长计划）-----------------------------------------------------
+
+@router.get("/growth/status")
+def growth_status(authorization: Optional[str] = Header(default=None),
+                  x_api_key: Optional[str] = Header(default=None, alias="X-Api-Key")):
+    """各账号的养虾状态：等级、能量、任务进度、虾数量（企业账号标注跳过）。"""
+    _check_admin_auth(authorization, x_api_key)
+    import growth as _growth
+    pool = _get_pool()
+    accounts = []
+    for a in pool.accounts.values():
+        s = a.summary()
+        item = {"name": s["name"], "nickname": s.get("nickname")}
+        try:
+            st = _growth.query_state(a.credential)
+            item.update(st)
+        except Exception as e:
+            item["error"] = f"{type(e).__name__}: {e}"
+        accounts.append(item)
+    return {"accounts": accounts}
+
+
+@router.post("/growth/run")
+def growth_run(authorization: Optional[str] = Header(default=None),
+               x_api_key: Optional[str] = Header(default=None, alias="X-Api-Key")):
+    """手动触发一轮养虾巡检：接取未接任务 + 领取已完成奖励（仅个人账号）。"""
+    _check_admin_auth(authorization, x_api_key)
+    import growth as _growth
+    pool = _get_pool()
+    results = _growth.run_for_pool(pool)
+    total_credit = sum(r.get("credit") or 0 for r in results)
+    return {"ok": True, "total_credit": total_credit, "results": results}
+
+
 # ---------------------------------------------------------------------------
 # 挂载到 FastAPI app
 # ---------------------------------------------------------------------------

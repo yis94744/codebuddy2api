@@ -393,6 +393,56 @@ QUOTA_KEYWORDS = (
 )
 RATE_KEYWORDS = ("rate.limit", "too many", "频繁", "限流", "请求过快")
 
+# 瞬时网络故障（DNS 抖动 / 连接被重置 / 读超时）不换账号，原地短暂退避后重试。
+# 实测踩坑：DNS 偶发解析失败时（[Errno 11001] getaddrinfo failed）请求直接失败，
+# 而重试机制此前只覆盖 quota/rate/auth 三类业务错误，网络抖动完全没兜底。
+NETWORK_RETRY_MAX = 2          # 网络错误最多重试 2 次（共 3 次尝试）
+NETWORK_RETRY_DELAY = 1.0      # 首次退避 1 秒，第二次 2 秒
+
+# 命中即判定为"瞬时网络故障"的关键词（均为小写匹配）
+NETWORK_ERROR_KEYWORDS = (
+    "getaddrinfo", "11001", "name or service not known",
+    "connecterror", "connect error", "connection reset", "connection aborted",
+    "connection refused", "temporary failure in name resolution",
+    "remotedisconnected", "server disconnected", "readtimeout", "read timeout",
+    "connecttimeout", "connect timeout", "pooltimeout", "network is unreachable",
+    "10054", "10060", "10061",
+)
+
+
+def _is_network_error(exc: BaseException) -> bool:
+    """判断异常是否为瞬时网络故障（重试即可恢复，无需换账号）。"""
+    if not isinstance(exc, httpx.HTTPError):
+        return False
+    s = f"{type(exc).__name__}: {exc}".lower()
+    return any(k in s for k in NETWORK_ERROR_KEYWORDS)
+
+
+async def _retry_network(attempt_fn, *, label: str = "", rid: str = "",
+                        max_retry: int = NETWORK_RETRY_MAX):
+    """执行 attempt_fn，遇到瞬时网络故障时原地退避重试。
+
+    attempt_fn 为无参异步可调用，返回任意结果；仅当抛出被 _is_network_error
+    判定为真的异常时才重试，其它异常原样抛出。重试耗尽后抛最后一次异常。
+    """
+    import asyncio as _asyncio
+    prefix = f"[{rid}] " if rid else ""
+    delay = NETWORK_RETRY_DELAY
+    last: Optional[BaseException] = None
+    for i in range(max_retry + 1):
+        try:
+            return await attempt_fn()
+        except Exception as e:
+            if not _is_network_error(e) or i >= max_retry:
+                raise
+            last = e
+            _log(f"{prefix}↻ 网络抖动，{delay:.0f}s 后重试（第 {i + 1}/{max_retry} 次）| "
+                 f"{label} | {e}")
+            await _asyncio.sleep(delay)
+            delay *= 2
+    if last is not None:
+        raise last
+
 
 def _classify_upstream_error(status: int, text: str = "") -> str:
     """把上游错误分类：quota(积分/额度) / rate(限流) / auth(鉴权) / other / 空(非错误)。"""
@@ -571,11 +621,14 @@ async def _post_chat_once(account, body, rid="", model_name="?"):
     """用指定账号向后端转发一次（后端仅支持流式，这里聚合返回）。
 
     返回 (status, result)：status != 200 时 result 为错误体 bytes。
+    瞬时网络故障（DNS 抖动等）在此层自动退避重试。
     """
-    headers = account.credential.get_headers()
-    url = f"{BACKEND}/v2/chat/completions"
-    c = get_http_client()
-    async with c.stream("POST", url, headers=headers, json=body, timeout=300.0) as r:
+
+    async def _once():
+        headers = account.credential.get_headers()
+        url = f"{BACKEND}/v2/chat/completions"
+        c = get_http_client()
+        async with c.stream("POST", url, headers=headers, json=body, timeout=300.0) as r:
             if r.status_code != 200:
                 raw = await r.aread()
                 _log(f"[{rid}] ✗ HTTP {r.status_code} | {model_name} | {_truncate(raw.decode('utf-8','replace'),200)}")
@@ -584,6 +637,7 @@ async def _post_chat_once(account, body, rid="", model_name="?"):
             collected = await _collect_stream(r)
             return 200, collected
 
+    return await _retry_network(_once, label=model_name, rid=rid)
 
 def _last_user_text(messages: list) -> str:
     """取最后一条 user 消息的文本，用于日志预览。"""
@@ -771,6 +825,8 @@ async def _stream_upstream(account, body: dict,
     url = f"{BACKEND}/v2/chat/completions"
     cur = account
     tried = 0
+    net_retry = 0          # 网络抖动重试计数（仅在本流尚未产出内容时允许）
+    produced = False       # 是否已向客户端吐过数据；已吐则不可重试
 
     def _feed(chunk: bytes):
         nonlocal finish_reason, saw_filter, buf
@@ -830,10 +886,18 @@ async def _stream_upstream(account, body: dict,
                         pool.mark_success(cur.id)
                     async for chunk in r.aiter_bytes():
                         if chunk:
+                            produced = True
                             raw_parts.append(chunk)
                             _feed(chunk)
                             yield chunk
         except httpx.HTTPError as e:
+            # 流未产出任何内容时，瞬时网络故障可安全重试；已产出则只能报错
+            if not produced and net_retry < NETWORK_RETRY_MAX and _is_network_error(e):
+                net_retry += 1
+                _log(f"{prefix}↻ 网络抖动，{int(NETWORK_RETRY_DELAY * net_retry)}s 后重试（第 {net_retry}/{NETWORK_RETRY_MAX} 次）| {model_name} | {e}")
+                import asyncio as _aio_r
+                await _aio_r.sleep(NETWORK_RETRY_DELAY * net_retry)
+                continue
             _log(f"{prefix}✗ 网络错误 | {model_name} | {e}")
             yield _err_event(str(e).encode(), 502)
         break
@@ -1029,10 +1093,17 @@ async def _stream_responses(account, body: dict,
     cur = account
     tried = 0
 
+    net_retry = 0
     while True:
         try:
             status_code, raw, _ = await _post_backend_with_filter_retry(url, cur, body, rid, model_name)
         except httpx.HTTPError as e:
+            if net_retry < NETWORK_RETRY_MAX and _is_network_error(e):
+                net_retry += 1
+                _log(f"{prefix}↻ 网络抖动，{int(NETWORK_RETRY_DELAY * net_retry)}s 后重试（第 {net_retry}/{NETWORK_RETRY_MAX} 次）| {model_name} | {e}")
+                import asyncio as _aio_r
+                await _aio_r.sleep(NETWORK_RETRY_DELAY * net_retry)
+                continue
             _log(f"{prefix}✗ 网络错误 | {model_name} | {e}")
             error_evt = {"type": "error", "error": {"message": str(e)[:500], "code": 502}}
             yield f"data: {json.dumps(error_evt, ensure_ascii=False)}\n\n".encode("utf-8")
@@ -1152,6 +1223,7 @@ async def _stream_anthropic(account, body: dict,
     cur = account
     tried = 0
 
+    net_retry = 0
     while True:
         headers = cur.credential.get_headers()
         try:
@@ -1181,6 +1253,12 @@ async def _stream_anthropic(account, body: dict,
                         if events:
                             yield events.encode("utf-8")
         except httpx.HTTPError as e:
+            if net_retry < NETWORK_RETRY_MAX and _is_network_error(e):
+                net_retry += 1
+                _log(f"{prefix}↻ 网络抖动，{int(NETWORK_RETRY_DELAY * net_retry)}s 后重试（第 {net_retry}/{NETWORK_RETRY_MAX} 次）| {model_name} | {e}")
+                import asyncio as _aio_r
+                await _aio_r.sleep(NETWORK_RETRY_DELAY * net_retry)
+                continue
             _log(f"{prefix}✗ 网络错误 | {model_name} | {e}")
             error_evt = {"type": "error", "error": {"message": str(e)[:500], "type": "api_error", "code": 502}}
             yield f"event: error\ndata: {json.dumps(error_evt, ensure_ascii=False)}\n\n".encode("utf-8")
@@ -1322,6 +1400,8 @@ def main():
 _server = None
 # 每日签到调度器（个人账号签到领积分）
 _checkin_scheduler = None
+# 养虾巡检调度器（接取成长计划任务 + 领取已完成奖励）
+_growth_scheduler = None
 
 
 def start(host="127.0.0.1", port=8787, api_key="", strategy="failover",
@@ -1404,6 +1484,27 @@ def start(host="127.0.0.1", port=8787, api_key="", strategy="failover",
     except Exception as e:
         sys.stderr.write(f"[警告] 签到调度器初始化失败：{e}\n")
 
+    # 启动养虾巡检调度器（成长计划：接取任务 + 领取奖励；仅个人账号参与）
+    global _growth_scheduler
+    try:
+        from growth import GrowthScheduler
+
+        def _emit_growth(msg, level="info", **kw):
+            try:
+                from ui_admin import LOG_BUS
+                LOG_BUS.emit(msg, level=level)
+            except Exception:
+                pass
+
+        _growth_scheduler = GrowthScheduler(
+            pool_getter=lambda: CONFIG.get("pool"),
+            emit=_emit_growth,
+        )
+        CONFIG["growth_scheduler"] = _growth_scheduler
+        _growth_scheduler.start()
+    except Exception as e:
+        sys.stderr.write(f"[警告] 养虾调度器初始化失败：{e}\n")
+
     # 启动 CodeBuddy CN 登录态自动同步：直接读取当前登录账号，切换时自动导入口+刷积分
     try:
         _cn_sync_stop.clear()
@@ -1426,11 +1527,16 @@ def start(host="127.0.0.1", port=8787, api_key="", strategy="failover",
 
 def stop():
     """优雅停止服务（供桌面启动器调用）。"""
-    global _server, _checkin_scheduler
+    global _server, _checkin_scheduler, _growth_scheduler
     _cn_sync_stop.set()
     if _checkin_scheduler is not None:
         try:
             _checkin_scheduler.stop()
+        except Exception:
+            pass
+    if _growth_scheduler is not None:
+        try:
+            _growth_scheduler.stop()
         except Exception:
             pass
     if _server is not None:
@@ -1545,6 +1651,16 @@ def _cn_autosync_loop():
                 except Exception as e:
                     _log(f"[CN自动同步] 同步失败：{_truncate(str(e), 120)}")
         _cn_sync_stop.wait(10)
+
+
+def run_growth_once() -> dict:
+    """手动执行一轮养虾巡检（供面板调用）。"""
+    global _growth_scheduler
+    if _growth_scheduler is None:
+        # 调度器未启动（如 --no-ui 模式）时，直接跑一次
+        import growth as _growth
+        return {"results": _growth.run_for_pool(CONFIG.get("pool"))}
+    return _growth_scheduler.run_once()
 
 
 def run_checkin_once(force: bool = True) -> dict:
