@@ -24,6 +24,9 @@ ENV/
 *.info
 # 本地运行配置（含 api_key）
 config.json
+# 账号自定义显示名映射（uid -> 名称，常含真实姓名）
+account_names.json
+account_names.json.tmp
 *.token
 *.key
 *.pem

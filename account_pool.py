@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 import threading
 import time
 import uuid
@@ -283,6 +284,53 @@ class Account:
             self.quota_exhausted = False
 
 
+# ---------------------------------------------------------------------------
+# 自定义账号名持久化
+#
+# Account.name 原先只存在内存中，进程重启后即退回自动昵称（登录昵称/文件名），
+# 用户手动改的名字会丢失。这里把它落盘：
+#   - 以 uid 为键而非文件名：桌面端换号登录会覆盖同一个 .info 文件，
+#     文件名无法代表账号身份，uid 才是稳定的账号标识
+#   - 存放于 config.json 同目录（打包版为 exe 旁，源码版为脚本旁）
+#   - 该文件含用户自定名称，已在 .gitignore 中排除，不应提交到仓库
+# ---------------------------------------------------------------------------
+
+def _app_dir() -> Path:
+    """定位配置目录：打包版为 exe 同目录，源码版为脚本同目录。"""
+    if getattr(sys, "frozen", False):
+        return Path(sys.executable).resolve().parent
+    return Path(__file__).resolve().parent
+
+
+def names_path() -> Path:
+    """账号自定义名的持久化文件路径。"""
+    return _app_dir() / "account_names.json"
+
+
+def load_names() -> dict:
+    """读取 uid -> 自定义名 映射；文件缺失或损坏时返回空映射。"""
+    try:
+        with open(names_path(), "r", encoding="utf-8") as f:
+            data = json.load(f)
+        if isinstance(data, dict):
+            return {str(k): str(v) for k, v in data.items() if v}
+    except Exception:
+        pass
+    return {}
+
+
+def save_names(mapping: dict) -> None:
+    """原子写入 uid -> 自定义名 映射；失败不影响主流程。"""
+    try:
+        p = names_path()
+        tmp = p.with_suffix(p.suffix + ".tmp")
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(mapping, f, ensure_ascii=False, indent=2)
+        os.replace(tmp, p)
+    except Exception:
+        pass
+
+
 class AccountPool:
     """账号池：扫描/切换/路由。"""
 
@@ -296,6 +344,7 @@ class AccountPool:
         self.strategy = strategy          # fixed | auto
         self.active_id: Optional[str] = None
         self._rr_index = 0
+        self._names = load_names()        # uid -> 用户自定义名（持久化）
         self.scan()
 
     # -- 扫描 ------------------------------------------------------------
@@ -320,9 +369,11 @@ class AccountPool:
                 existing = next((a for a in self.accounts.values() if a.path == f), None)
                 if existing is None:
                     acct = Account(f)
+                    self._apply_saved_name(acct)
                     self.accounts[acct.id] = acct
                 else:
                     try:
+                        self._apply_saved_name(existing)
                         existing.refresh_name()
                     except Exception:
                         pass
@@ -341,16 +392,37 @@ class AccountPool:
                 if a.path == p:
                     return a.summary()
             acct = Account(p, name)
+            if name is None:
+                self._apply_saved_name(acct)   # 复用该账号保存过的自定义名
             self.accounts[acct.id] = acct
             if self.active_id is None:
                 self.active_id = acct.id
             return acct.summary()
+
+    def _uid_of(self, acct: "Account") -> Optional[str]:
+        """取账号 uid（持久化用键）；读取失败返回 None。"""
+        try:
+            return (acct.credential.summary() or {}).get("uid") or None
+        except Exception:
+            return None
+
+    def _apply_saved_name(self, acct: "Account") -> None:
+        """若该账号（按 uid）存过自定义名，则套用它并标记为手动命名。"""
+        uid = self._uid_of(acct)
+        if uid and self._names.get(str(uid)):
+            acct.name = self._names[str(uid)]
+            acct.name_manual = True
 
     def rename(self, account_id: str, name: str) -> dict:
         with self._lock:
             acct = self._get(account_id)
             acct.name = name.strip() or acct.path.stem
             acct.name_manual = True   # 手动命名，之后自动刷新不覆盖
+            # 落盘：重启后名字不再丢失
+            uid = self._uid_of(acct)
+            if uid:
+                self._names[str(uid)] = acct.name
+                save_names(self._names)
             return acct.summary()
 
     def set_enabled(self, account_id: str, enabled: bool) -> dict:
