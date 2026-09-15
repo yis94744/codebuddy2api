@@ -193,6 +193,11 @@ body{background:var(--bg);color:var(--text);font-family:"Segoe UI","PingFang SC"
                 <div class="hint" title="任务进度 / 可领取奖励">
                   {{row.growth.tasks_done ?? 0}}/{{row.growth.tasks_total ?? 0}} 任务<template v-if="row.growth.claimable>0"> · <span style="color:var(--warn)">{{row.growth.claimable}} 项可领</span></template>
                 </div>
+                <div class="hint" title="连续签到进度：达到 7/14/28 天可解锁兑换档位">
+                  连续 {{row.growth.streak_days ?? 0}} 天<template v-if="row.growth.streak_remaining>0"> · 还差 {{row.growth.streak_remaining}} 天到 {{row.growth.streak_next}}</template>
+                  <template v-if="row.growth.lottery_chances>0"> · 抽奖 {{row.growth.lottery_chances}} 次</template>
+                  <template v-if="row.growth.makeup_cards>0"> · 补签卡 {{row.growth.makeup_cards}}</template>
+                </div>
               </template>
               <span v-else-if="row.growth && row.growth.note" class="hint">不参与</span>
               <span v-else class="hint" title="尚未采集，等待下一轮巡检">待采集</span>
