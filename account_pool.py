@@ -27,6 +27,13 @@ import httpx
 import netenv
 
 # 各错误类别的冷却时长（秒）。冷却期内的账号不参与路由，到期自动恢复。
+# 北京时间（UTC+8）：面板的「今日」口径以此为准
+def _beijing_today() -> str:
+    """返回北京时间的今日日期字符串（YYYY-MM-DD），用于跨天归零判断。"""
+    from datetime import datetime, timedelta, timezone
+    return datetime.now(timezone(timedelta(hours=8))).strftime("%Y-%m-%d")
+
+
 COOLDOWN_QUOTA = 600     # 积分/额度耗尽：10 分钟（每日额度场景足够让额度刷新后自动顶上）
 COOLDOWN_RATE = 60       # 限流：1 分钟
 COOLDOWN_AUTH = 30       # 鉴权失败：30 秒
@@ -62,6 +69,9 @@ class Account:
         self.last_success_at: float = 0.0
         # -- 积分台账（本次运行累计；上游无余额接口，无法显示绝对剩余） --
         self.credit_spent: float = 0.0
+        # 今日消耗（按北京时间自然日重置；面板按天展示用）
+        self.credit_spent_today: float = 0.0
+        self.credit_today_date: str = ""
         # -- 真实余额（个人账号经 /billing/meter/get-user-resource 查询，企业账号为空） --
         self.real_credit: Optional[float] = None
         self.real_credit_at: float = 0.0
@@ -127,6 +137,7 @@ class Account:
             "last_error_at": self.last_error_at,
             "last_success_at": self.last_success_at,
             "credit_spent": round(self.credit_spent, 4),
+            "credit_spent_today": round(self.today_credit(), 4),
             "real_credit": (round(self.real_credit, 2)
                             if self.real_credit is not None else None),
             "real_credit_at": self.real_credit_at,
@@ -165,10 +176,25 @@ class Account:
         with self._lock:
             if c > 0:
                 self.credit_spent += c
+                self._roll_today_locked()
+                self.credit_spent_today += c
                 # 本地乐观扣减真实余额，让面板立即响应消耗（真实值在异步刷新后校正）
                 if self.real_credit is not None:
                     self.real_credit = max(0.0, self.real_credit - c)
             return self.credit_spent
+
+    def _roll_today_locked(self) -> None:
+        """跨天后把今日消耗归零（调用方需已持锁）。"""
+        today = _beijing_today()
+        if self.credit_today_date != today:
+            self.credit_today_date = today
+            self.credit_spent_today = 0.0
+
+    def today_credit(self) -> float:
+        """返回今日消耗（跨天自动归零，线程安全）。"""
+        with self._lock:
+            self._roll_today_locked()
+            return self.credit_spent_today
 
     def _mask_token(self) -> str:
         try:

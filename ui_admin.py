@@ -15,6 +15,7 @@ import collections
 import json
 import threading
 import time
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 from fastapi import APIRouter, Header, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
@@ -27,6 +28,17 @@ from account_pool import AccountPool
 # ---------------------------------------------------------------------------
 # 日志总线：内存环形缓冲 + WebSocket 广播
 # ---------------------------------------------------------------------------
+
+# 北京时间（UTC+8）——面板口径统一按此计算自然日
+_BEIJING_TZ = timezone(timedelta(hours=8))
+
+
+def _today_start_ts() -> float:
+    """返回北京时间今日 0 点对应的 unix 时间戳（用于「今日」统计归零）。"""
+    now_bj = datetime.now(_BEIJING_TZ)
+    midnight = now_bj.replace(hour=0, minute=0, second=0, microsecond=0)
+    return midnight.timestamp()
+
 
 class LogBus:
     def __init__(self, maxlen: int = 5000):
@@ -67,10 +79,15 @@ class LogBus:
             return list(self._items)[-limit:]
 
     def stats(self) -> dict:
+        # 「今日」按北京时间自然日统计（0 点归零），而非滚动 24 小时窗口。
+        # 原实现用 now - 86400，导致昨天下午的请求到今天下午仍计入今日，
+        # 面板数字看起来永远不清零。
+        # 注意：这里只改统计口径，不裁剪 _items —— 面板日志列表（history）
+        # 仍需保留历史记录供排查。
+        cutoff = _today_start_ts()
         with self._lock:
             items = list(self._items)
-        now = time.time()
-        today = [i for i in items if i["ts"] >= now - 86400]
+        today = [i for i in items if i["ts"] >= cutoff]
         warns = [i for i in today if i["level"] == "warn"]
         errors = [i for i in today if i["level"] == "error"]
         filters = [i for i in today if "审核拦截" in i["msg"] or "content-filter" in i["msg"].lower()]
@@ -455,6 +472,7 @@ def billing_status(authorization: Optional[str] = Header(default=None),
             "nickname": s.get("nickname"),
             "health": s["health"],
             "credit_spent": s["credit_spent"],
+            "credit_spent_today": s.get("credit_spent_today"),
             "real_credit": s["real_credit"],
             "real_credit_note": s["real_credit_note"],
         })

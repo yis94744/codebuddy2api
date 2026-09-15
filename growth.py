@@ -36,6 +36,13 @@ EP_BUDDY_INFO = BACKEND + "/activity/growth/buddy/info"
 EP_BUDDY_LIST = BACKEND + "/activity/growth/buddy/list"
 EP_BUDDY_QUOTA = BACKEND + "/activity/growth/buddy/quota"
 EP_STREAK = BACKEND + "/activity/growth/streak"
+EP_TRAVEL_CONFIG = BACKEND + "/activity/growth/buddy/travel/config"
+EP_TRAVEL_STATUS = BACKEND + "/activity/growth/buddy/travel/status"
+EP_TRAVEL_DEPART = BACKEND + "/activity/growth/buddy/travel/depart"
+EP_TRAVEL_CLAIM = BACKEND + "/activity/growth/buddy/travel/claim"
+EP_TRAVEL_RECORDS = BACKEND + "/activity/growth/buddy/travel/records"
+EP_BUDDY_OPEN = BACKEND + "/activity/growth/buddy/open"
+EP_LOTTERY_CHANCES = BACKEND + "/activity/growth/lottery/chances"
 
 USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) CodeBuddy/3.0.0"
 
@@ -222,9 +229,84 @@ def accept_all(credential) -> Tuple[int, List[str]]:
     return ok_count, details
 
 
-def run_for_pool(pool, *, do_accept: bool = True, do_claim: bool = True):
+# ---------------------------------------------------------------------------
+# 虾出行（Buddy Travel）—— 积分产出的主要来源
+#
+# 机制：派虾出门 → 1~4 小时 → 到达后可领 5~10 积分 → 虾回 idle 可再派。
+# 实测：travel/depart 与 travel/claim 均可在服务端直接调用，无需客户端介入，
+# 因此「领出行奖励」和「再派出行」都能全自动。
+# ---------------------------------------------------------------------------
+
+def travel_status(credential) -> Dict[str, Any]:
+    """查询虾出行状态：state(idle/traveling/arrived) / 地点 / 待领积分。"""
+    code, res = _get(credential, EP_TRAVEL_STATUS)
+    if code != 200 or not isinstance(res, dict):
+        return {"ok": False, "note": f"出行状态查询失败 (HTTP {code})"}
+    d = res.get("data") or {}
+    return {
+        "ok": True,
+        "state": d.get("state"),
+        "buddy_id": d.get("buddy_id") or 0,
+        "record_id": d.get("record_id") or 0,
+        "location": (d.get("location") or {}).get("name"),
+        "arrive_at": d.get("arrive_at") or 0,
+        "server_now": d.get("server_now") or 0,
+        "reward_credit": d.get("reward_credit") or 0,
+        "daily_limit_reached": d.get("daily_limit_reached"),
+        "letter": (d.get("letter") or {}).get("text"),
+    }
+
+
+def travel_locations(credential) -> List[dict]:
+    """返回可出行目的地列表（含时长与收益区间）。"""
+    code, res = _get(credential, EP_TRAVEL_CONFIG)
+    if code != 200 or not isinstance(res, dict):
+        return []
+    return (res.get("data") or {}).get("locations") or []
+
+
+def travel_claim(credential) -> Tuple[bool, int, str]:
+    """领取已到达的出行奖励。返回 (是否成功, 积分数, 提示)。"""
+    code, res = _post(credential, EP_TRAVEL_CLAIM, {})
+    if code != 200 or not isinstance(res, dict):
+        return False, 0, f"领取出行奖励失败 (HTTP {code})"
+    if res.get("code") != 0:
+        return False, 0, str(res.get("msg") or "领取失败")[:60]
+    d = res.get("data") or {}
+    credit = int(d.get("reward_credit") or 0)
+    return True, credit, f"出行奖励 +{credit} 积分"
+
+
+def travel_depart(credential, location_id: int = 1) -> Tuple[bool, str, int]:
+    """派虾出行。返回 (是否成功, 提示, 到达时间戳)。"""
+    code, res = _post(credential, EP_TRAVEL_DEPART, {"location_id": location_id})
+    if code != 200 or not isinstance(res, dict):
+        return False, f"派虾出行失败 (HTTP {code})", 0
+    if res.get("code") != 0:
+        return False, str(res.get("msg") or "出行失败")[:60], 0
+    d = res.get("data") or {}
+    loc = (d.get("location") or {}).get("name") or "?"
+    return True, f"虾已出发前往{loc}", int(d.get("arrive_at") or 0)
+
+
+def open_buddy(credential) -> Tuple[bool, str]:
+    """用能量开一只新虾（默认消耗 10 能量）。"""
+    code, res = _post(credential, EP_BUDDY_OPEN, {})
+    if code != 200 or not isinstance(res, dict):
+        return False, f"开虾失败 (HTTP {code})"
+    if res.get("code") != 0:
+        return False, str(res.get("msg") or "开虾失败")[:60]
+    d = res.get("data") or {}
+    b = d.get("buddy") or d
+    name = b.get("name") or "新虾"
+    return True, f"获得新虾「{name}」"
+
+
+def run_for_pool(pool, *, do_accept: bool = True, do_claim: bool = True,
+                 do_travel: bool = True, do_open: bool = True):
     """对账号池中所有「个人账号」执行一轮养虾操作（企业账号自动跳过）。
 
+    完整闭环：接取任务 → 领取任务奖励 → 虾出行（领奖+派出）→ 能量够则开新虾。
     返回逐账号结果列表，供面板与日志展示。
     """
     results = []
@@ -244,30 +326,102 @@ def run_for_pool(pool, *, do_accept: bool = True, do_claim: bool = True):
             accepted = 0
             if do_accept:
                 accepted, _ = accept_all(acct.credential)
+
             claimed, credit, details = (0, 0, [])
             if do_claim:
                 claimed, credit, details = claim_all(acct.credential)
+
+            # 虾出行：先领已到达的奖励，再把空闲的虾派出去（积分主要来源）
+            travel_credit = 0
+            travel_note = ""
+            if do_travel:
+                travel_credit, travel_note = _travel_cycle(acct.credential, details)
+
+            # 能量够就开新虾（上限 5 只），虾越多后续出行收益越高
+            opened_note = ""
+            if do_open:
+                opened_note = _maybe_open_buddy(acct.credential, details)
+
+            total_credit = credit + travel_credit
+            parts = []
+            if accepted:
+                parts.append(f"接取 {accepted} 个任务")
+            if claimed:
+                parts.append(f"领取 {claimed} 项 +{credit} 积分")
+            if travel_credit:
+                parts.append(f"出行 +{travel_credit} 积分")
+            if opened_note:
+                parts.append(opened_note)
             results.append({
                 **base, "skipped": False,
-                "accepted": accepted, "claimed": claimed, "credit": credit,
-                "message": (f"接取 {accepted} 个任务，领取 {claimed} 项 +{credit} 积分"
-                            if (accepted or claimed) else "无可操作项"),
-                "details": details[:8],
+                "accepted": accepted, "claimed": claimed,
+                "credit": credit, "travel_credit": travel_credit,
+                "total_credit": total_credit,
+                "message": "，".join(parts) if parts else "无可操作项",
+                "details": details[:10],
             })
         except Exception as e:
             results.append({**base, "skipped": False, "error": f"{type(e).__name__}: {e}"})
     return results
 
 
+def _travel_cycle(credential, details: List[str]) -> Tuple[int, str]:
+    """一轮出行处理：领到达奖励 + 派出空闲虾。返回 (获得积分, 说明)。"""
+    got = 0
+    st = travel_status(credential)
+    if not st.get("ok"):
+        return 0, ""
+    state = st.get("state")
+    # 已到达 → 领奖
+    if state == "arrived":
+        ok, credit, msg = travel_claim(credential)
+        if ok and credit:
+            got += credit
+            details.append(f"虾出行到达：{msg}")
+        st = travel_status(credential)
+        state = st.get("state")
+    # 空闲 → 派出（换着地点去，避免同一处反复）
+    if state == "idle":
+        locs = travel_locations(credential)
+        if locs:
+            pick = locs[len(details) % len(locs)]
+            ok, msg, _ = travel_depart(credential, int(pick.get("id") or 1))
+            if ok:
+                details.append(msg)
+    return got, ("有出行收益" if got else "")
+
+
+def _maybe_open_buddy(credential, details: List[str]) -> str:
+    """能量够且未达上限时开一只新虾。返回说明文本（未开则为空）。"""
+    code, res = _get(credential, EP_BUDDY_QUOTA)
+    if code != 200 or not isinstance(res, dict):
+        return ""
+    d = res.get("data") or {}
+    affordable = int(d.get("affordable") or 0)
+    cost = int(d.get("cost_per_open") or DEFAULT_COST_PER_OPEN)
+    if affordable <= 0:
+        return ""
+    ok, msg = open_buddy(credential)
+    if ok:
+        details.append(f"{msg}（耗 {cost} 能量）")
+        return msg
+    return ""
+
+
 class GrowthScheduler:
     """养虾巡检调度器：定时接取任务 + 领取已完成奖励。
 
-    与签到不同，养虾奖励的产生依赖用户在客户端的真实操作，所以这里采用
-    「定时轮询」而非「每天一次」：只要你在客户端做了任务，下一次巡检就会
-    把奖励领掉。默认每 30 分钟检查一次。
+    一轮巡检做四件事（完整闭环）：
+      1. 接取尚未接取的任务；
+      2. 领取已完成任务的奖励（依赖你在客户端的真实操作）；
+      3. 虾出行：领取已到达的奖励 + 把空闲的虾派出去（积分主要来源）；
+      4. 能量足够时开新虾（虾越多，后续出行收益越高）。
+
+    采用「定时轮询」而非「每天一次」：虾出行 1~4 小时一轮，任务完成也随时
+    发生，所以每 15 分钟检查一次，收益到点即收。
     """
 
-    INTERVAL_SECONDS = 1800
+    INTERVAL_SECONDS = 900
 
     def __init__(self, pool_getter, emit=None):
         self._pool_getter = pool_getter
@@ -299,18 +453,20 @@ class GrowthScheduler:
             self._stop.wait(self.INTERVAL_SECONDS)
 
     def run_once(self) -> dict:
-        """执行一轮养虾巡检（接取 + 领奖）。"""
+        """执行一轮养虾巡检：接取 → 领任务奖 → 虾出行 → 开虾。"""
         with self._lock:
             pool = self._pool_getter()
             results = run_for_pool(pool)
         for r in results:
             if r.get("skipped") or r.get("error"):
                 continue
-            if r.get("claimed"):
-                self._emit(f"养虾 {r['nickname']} 领取 {r['claimed']} 项奖励 +{r['credit']} 积分",
+            label = r.get("nickname") or r.get("name")
+            total = r.get("total_credit") or 0
+            if total:
+                self._emit(f"养虾 {label} {r.get('message')}（本轮 +{total} 积分）",
                            level="credit")
             elif r.get("accepted"):
-                self._emit(f"养虾 {r['nickname']} 接取 {r['accepted']} 个任务", level="info")
+                self._emit(f"养虾 {label} {r.get('message')}", level="info")
         return {"results": results}
 
 
