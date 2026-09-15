@@ -403,18 +403,54 @@ class AccountPool:
                         self.active_id = None
                     del self.accounts[aid]
             # 新增账号（按文件路径去重）；已有账号名字跟随登录昵称刷新
+            #
+            # 注意：同一账号可能同时出现在多个 .info 里 —— 桌面端把当前登录写成
+            # workbuddy-desktop.info，而它同时也会留下一份带时间戳的快照；企业号
+            # 场景下甚至会出现两个文件内容完全相同（同一 uid）。只按路径去重会把
+            # 同一个账号列成两个，因此这里再用 uid 二次去重，保留信息更全的那份。
+            def _acct_uid(a: "Account") -> Optional[str]:
+                try:
+                    return (a.credential.summary() or {}).get("uid") or None
+                except Exception:
+                    return None
+
             for f in found:
                 existing = next((a for a in self.accounts.values() if a.path == f), None)
-                if existing is None:
-                    acct = Account(f)
-                    self._apply_saved_name(acct)
-                    self.accounts[acct.id] = acct
-                else:
+                if existing is not None:
                     try:
                         self._apply_saved_name(existing)
                         existing.refresh_name()
                     except Exception:
                         pass
+                    continue
+
+                acct = Account(f)
+                self._apply_saved_name(acct)
+
+                # uid 去重：若已有同 uid 的账号，保留「非 workbuddy-desktop.info」的
+                # 那份（快照文件通常更完整），否则保留先到的
+                uid = _acct_uid(acct)
+                dup = None
+                if uid:
+                    for other in self.accounts.values():
+                        if _acct_uid(other) == uid:
+                            dup = other
+                            break
+                if dup is not None:
+                    prefer_new = (dup.path.name == "workbuddy-desktop.info"
+                                  and acct.path.name != "workbuddy-desktop.info")
+                    if prefer_new:
+                        # 新文件更合适：用新对象替换旧的，保留自定义名
+                        acct.name = dup.name
+                        acct.name_manual = getattr(dup, "name_manual", False)
+                        if self.active_id == dup.id:
+                            self.active_id = acct.id
+                        del self.accounts[dup.id]
+                        self.accounts[acct.id] = acct
+                    # 否则丢弃新对象（已有更合适的）
+                    continue
+
+                self.accounts[acct.id] = acct
             # 确保有 active 账号
             if self.active_id is None or self.active_id not in self.accounts:
                 self.active_id = next(iter(self.accounts.keys()), None)
