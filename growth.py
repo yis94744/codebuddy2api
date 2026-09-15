@@ -307,10 +307,22 @@ def travel_claim(credential) -> Tuple[bool, int, str]:
     return True, credit, f"出行奖励 +{credit} 积分"
 
 
+# 服务端对「放虾」的业务性拒绝：都属于正常状态，不应记为失败
+TRAVEL_SOFT_REJECTS = (
+    "daily limit reached",   # 今日出行次数用尽
+    "already traveling",     # 已有虾在外出
+    "no buddy",              # 还没有虾
+)
+
+
 def travel_depart(credential, location_id: int = 1) -> Tuple[bool, str, int]:
-    """派虾出行。返回 (是否成功, 提示, 到达时间戳)。"""
+    """派虾出行。返回 (是否成功, 提示, 到达时间戳)。
+
+    业务性拒绝（次数用尽 / 已在外出）也返回 False，但提示文本用服务端原话，
+    便于上层区分「正常跳过」与「真异常」。
+    """
     code, res = _post(credential, EP_TRAVEL_DEPART, {"location_id": location_id})
-    if code != 200 or not isinstance(res, dict):
+    if not isinstance(res, dict):
         return False, f"派虾出行失败 (HTTP {code})", 0
     if res.get("code") != 0:
         return False, str(res.get("msg") or "出行失败")[:60], 0
@@ -571,7 +583,15 @@ def _travel_cycle(credential, details: List[str],
         state = st.get("state")
 
     # 空闲 → 放虾（派出）
+    # 服务端对「今日次数用尽」会返回 daily limit reached，先读状态再决定是否调用，
+    # 避免每轮巡检都打一条无意义的失败日志。
     if state == "idle":
+        if st.get("daily_limit_reached"):
+            events.append({
+                "kind": "travel_skip",
+                "text": "虾已空闲，但今日出行次数已用尽（明日恢复）",
+            })
+            return got, ("有出行收益" if got else "")
         locs = travel_locations(credential)
         if locs:
             pick = locs[len(details) % len(locs)]
@@ -585,6 +605,9 @@ def _travel_cycle(credential, details: List[str],
                     "kind": "travel_depart",
                     "text": f"放虾出发：{name}（预计收益 {lo}~{hi} 积分）",
                 })
+            elif any(k in (msg or "").lower() for k in TRAVEL_SOFT_REJECTS):
+                # 正常状态（次数用尽/已在外出），记 info 而非告警
+                events.append({"kind": "travel_skip", "text": f"暂不安排出行：{msg}"})
             else:
                 events.append({"kind": "travel_err", "text": f"放虾失败：{msg}"})
     return got, ("有出行收益" if got else "")
