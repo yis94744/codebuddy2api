@@ -162,8 +162,9 @@ class App:
 
     def _build(self):
         self.root.title("CodeBuddy2API · 积分池网关")
-        self.root.geometry("480x680")
-        self.root.minsize(420, 600)
+        # 加宽加高：账号行现在带养虾数据（⚡能量 🦐虾 连续天数），且不再截断到 6 个
+        self.root.geometry("560x760")
+        self.root.minsize(520, 640)
         set_window_icon(self.root)
 
         # 主容器
@@ -191,8 +192,10 @@ class App:
         self.lbl_addr = ctk.CTkLabel(card, text="", anchor="w",
                                      font=ctk.CTkFont(family="Consolas", size=11))
         self.lbl_addr.grid(row=0, column=0, sticky="ew", padx=14, pady=(10, 4))
+        # 用等宽字体，账号名/状态/余额/养虾数据列能对齐，扫一眼就看清
         self.lbl_pool = ctk.CTkLabel(card, text="", anchor="w", justify="left",
-                                     font=ctk.CTkFont(size=11), text_color="gray80")
+                                     font=ctk.CTkFont(family="Consolas", size=11),
+                                     text_color="gray80")
         self.lbl_pool.grid(row=1, column=0, sticky="ew", padx=14, pady=(0, 10))
 
         # ---- 统计双卡 ----
@@ -449,9 +452,18 @@ class App:
         ok = ps.get("ok", 0)
         tot = ps.get("total", 0)
         cool = ps.get("cooldown", 0)
+        # 展示全部账号（原先硬编码 [:6] 会截断，账号一多就看不到后面的）。
+        # 每行附带养虾数据：⚡能量 / 🦐虾数 / 连续签到天数。
         rows = []
-        for a in (accts.get("accounts") or [])[:6]:
+        all_accts = accts.get("accounts") or []
+        for a in all_accts:
             nm = a.get("name", "?")
+            # 过长的名字（企业号常是完整邮箱）压到 10 字符内，避免撑乱等宽列。
+            # 注意保留「尾部」——多个企业号往往只有结尾数字不同
+            # （WeChatGame8/9/10），截头去尾会全部变成同一个名字。
+            if len(nm) > 10:
+                local = nm.split("@", 1)[0] if "@" in nm else nm
+                nm = local[:2] + "…" + local[-5:] if len(local) > 7 else nm[:9] + "…"
             h = a.get("health", "?")
             sp = a.get("credit_spent", 0)
             rc = a.get("real_credit")
@@ -463,6 +475,13 @@ class App:
                 bal = "企业版"
             else:
                 bal = "累计 %s" % sp
+            # 养虾数据：企业账号 or 尚未采集时不显示
+            g = a.get("growth") or {}
+            if g and not g.get("note"):
+                bal += "  ⚡%s 🦐%s" % (g.get("energy", 0), g.get("buddies", 0))
+                sd = g.get("streak_days")
+                if sd is not None:
+                    bal += " 连%s天" % sd
             rows.append("%s%-10s %s %-9s %s" % (star, nm, hicon, h, bal))
         self.lbl_pool.configure(text="账号池 %s/%s（冷却%s） · 主力 %s\n%s" % (
             ok, tot, cool, active, "\n".join(rows)))
