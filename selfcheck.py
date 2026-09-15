@@ -77,6 +77,7 @@ MODULES = [
     ("responses_adapter", "Responses 协议适配", True),
     ("responses_projection", "Responses 请求投影", True),
     ("anthropic_adapter", "Anthropic 协议适配", True),
+    ("growth", "养虾活动（成长计划）", True),
     ("ui_admin", "管理面板后端", True),
     ("converter", "主服务", True),
 ]

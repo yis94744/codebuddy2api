@@ -60,6 +60,11 @@ rem 若直接连 dist 一起删，打包版启动时会退回默认端口，白�
 set "CFG_BAK=%TEMP%\cb2a_cfg_backup.json"
 if exist "dist\config.json" copy /y "dist\config.json" "%CFG_BAK%" >nul
 
+rem 账号自定义名映射（uid -> 名称）同样要保留：它只在 dist 目录里，
+rem 打包连带删除会让面板里的自定义名全部回退成登录昵称。
+set "NAMES_BAK=%TEMP%\cb2a_names_backup.json"
+if exist "dist\account_names.json" copy /y "dist\account_names.json" "%NAMES_BAK%" >nul
+
 if exist build rmdir /s /q build
 if exist dist rmdir /s /q dist
 
@@ -84,6 +89,7 @@ if exist dist rmdir /s /q dist
   --hidden-import responses_adapter ^
   --hidden-import responses_projection ^
   --hidden-import anthropic_adapter ^
+  --hidden-import growth ^
   --hidden-import ssl_bootstrap ^
   --hidden-import netenv ^
   --hidden-import selfcheck ^
@@ -112,6 +118,10 @@ if not exist "dist\CodeBuddy2API.exe" (
 if exist "%CFG_BAK%" (
     copy /y "%CFG_BAK%" "dist\config.json" >nul
     del "%CFG_BAK%" >nul 2>&1
+)
+if exist "%NAMES_BAK%" (
+    copy /y "%NAMES_BAK%" "dist\account_names.json" >nul
+    del "%NAMES_BAK%" >nul 2>&1
 )
 
 rem -- 4. 自检 --------------------------------------------------
