@@ -536,7 +536,11 @@ def growth_run(authorization: Optional[str] = Header(default=None),
     import growth as _growth
     pool = _get_pool()
     results = _growth.run_for_pool(pool)
-    total_credit = sum(r.get("credit") or 0 for r in results)
+    # 总收益要含「任务奖励 + 出行收益」；此前只累加了 r["credit"]，
+    # 漏掉 travel_credit，导致收虾到账但接口报 0。
+    total_credit = sum((r.get("total_credit")
+                        if r.get("total_credit") is not None
+                        else (r.get("credit") or 0)) for r in results)
     return {"ok": True, "total_credit": total_credit, "results": results}
 
 
