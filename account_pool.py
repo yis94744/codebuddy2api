@@ -76,6 +76,9 @@ class Account:
         self.real_credit: Optional[float] = None
         self.real_credit_at: float = 0.0
         self.real_credit_note: str = ""
+        # -- 养虾活动快照（由养虾巡检/GrowthScheduler 定期刷新，供面板展示）--
+        self.growth: Optional[dict] = None
+        self.growth_at: float = 0.0
 
     # -- 名字跟随登录账号 -------------------------------------------------
     def _auto_name(self) -> Optional[str]:
@@ -142,6 +145,9 @@ class Account:
                             if self.real_credit is not None else None),
             "real_credit_at": self.real_credit_at,
             "real_credit_note": self.real_credit_note,
+            # 养虾快照：energy/buddies/level/claimable 等（未采集时为 None）
+            "growth": self.growth,
+            "growth_at": self.growth_at,
         }
 
     def refresh_real_credit(self) -> Optional[float]:
@@ -189,6 +195,12 @@ class Account:
         if self.credit_today_date != today:
             self.credit_today_date = today
             self.credit_spent_today = 0.0
+
+    def set_growth(self, data: Optional[dict]) -> None:
+        """更新养虾快照（由养虾巡检调用；线程安全）。"""
+        with self._lock:
+            self.growth = data
+            self.growth_at = time.time()
 
     def today_credit(self) -> float:
         """返回今日消耗（跨天自动归零，线程安全）。"""

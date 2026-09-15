@@ -182,15 +182,31 @@ body{background:var(--bg);color:var(--text);font-family:"Segoe UI","PingFang SC"
               </template>
             </template>
           </el-table-column>
-          <el-table-column label="Token 过期" width="150">
+          <el-table-column label="养虾" width="190">
+            <template #default="{row}">
+              <template v-if="row.growth && !row.growth.note">
+                <div style="display:flex;gap:10px;align-items:center;white-space:nowrap">
+                  <span title="能量（开虾用）">⚡<b style="color:var(--accent)">{{row.growth.energy ?? 0}}</b></span>
+                  <span title="虾的数量">🦐<b style="color:var(--warn)">{{row.growth.buddies ?? 0}}</b></span>
+                  <span class="hint" title="等级">{{row.growth.level_name || ('Lv.'+(row.growth.level||0))}}</span>
+                </div>
+                <div class="hint" title="任务进度 / 可领取奖励">
+                  {{row.growth.tasks_done ?? 0}}/{{row.growth.tasks_total ?? 0}} 任务<template v-if="row.growth.claimable>0"> · <span style="color:var(--warn)">{{row.growth.claimable}} 项可领</span></template>
+                </div>
+              </template>
+              <span v-else-if="row.growth && row.growth.note" class="hint">不参与</span>
+              <span v-else class="hint" title="尚未采集，等待下一轮巡检">待采集</span>
+            </template>
+          </el-table-column>
+          <el-table-column label="Token 过期" width="110">
             <template #default="{row}">
               <span :style="{color:row.token_expired?'var(--err)':'var(--text)'}">{{fmtExpire(row.token_expires_at)}}</span>
             </template>
           </el-table-column>
-          <el-table-column label="凭据文件" min-width="200" show-overflow-tooltip>
+          <el-table-column label="凭据文件" width="150" show-overflow-tooltip>
             <template #default="{row}"><span class="mono" style="color:var(--text-dim)">{{row.file}}</span></template>
           </el-table-column>
-          <el-table-column label="失败/错误" min-width="170" show-overflow-tooltip>
+          <el-table-column label="失败/错误" width="140" show-overflow-tooltip>
             <template #default="{row}">
               <template v-if="row.last_error">
                 <div class="hint" style="color:var(--warn)">{{row.fail_count||1}} 次失败</div>
@@ -202,18 +218,21 @@ body{background:var(--bg);color:var(--text);font-family:"Segoe UI","PingFang SC"
           <el-table-column label="当前" width="80">
             <template #default="{row}"><el-tag v-if="pool.active_id===row.id" type="primary" size="small">在用</el-tag></template>
           </el-table-column>
-          <el-table-column label="操作" width="330">
+          <el-table-column label="操作" width="230" fixed="right">
             <template #default="{row}">
               <el-button size="small" type="primary" plain :disabled="pool.active_id===row.id" @click="switchAcct(row.id)">切换</el-button>
-              <el-button size="small" plain :loading="checkingId===row.id" @click="checkAcct(row.id)">检测</el-button>
-              <el-button v-if="row.health==='ok'" size="small" plain type="warning" @click="markExhausted(row.id)">标记耗尽</el-button>
-              <el-button v-if="row.health==='exhausted'||row.health==='cooldown'" size="small" plain type="success" @click="recoverAcct(row.id)">恢复</el-button>
-              <el-button size="small" plain @click="viewAcct(row)">详情</el-button>
-            </template>
-          </el-table-column>
-          <el-table-column label="签到" width="90">
-            <template #default="{row}">
               <el-button size="small" plain type="warning" :loading="checkinId===row.id" @click="checkinAcct(row)">签到</el-button>
+              <el-dropdown size="small" trigger="click" style="margin-left:8px">
+                <el-button size="small" plain>更多 ▾</el-button>
+                <template #dropdown>
+                  <el-dropdown-menu>
+                    <el-dropdown-item :loading="checkingId===row.id" @click="checkAcct(row.id)">有效性检测</el-dropdown-item>
+                    <el-dropdown-item v-if="row.health==='ok'" @click="markExhausted(row.id)">标记耗尽</el-dropdown-item>
+                    <el-dropdown-item v-if="row.health==='exhausted'||row.health==='cooldown'" @click="recoverAcct(row.id)">恢复</el-dropdown-item>
+                    <el-dropdown-item @click="viewAcct(row)">查看详情</el-dropdown-item>
+                  </el-dropdown-menu>
+                </template>
+              </el-dropdown>
             </template>
           </el-table-column>
         </el-table>

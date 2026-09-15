@@ -320,6 +320,11 @@ def run_for_pool(pool, *, do_accept: bool = True, do_claim: bool = True,
         nickname = s.get("nickname") or acct.name
         base = {"name": acct.name, "nickname": nickname}
         if is_enterprise(acct.credential):
+            # 企业账号不参与养虾活动；写入标记快照，面板可据此显示「不参与」
+            try:
+                acct.set_growth({"note": "企业账号不参与"})
+            except Exception:
+                pass
             results.append({**base, "skipped": True, "message": "企业账号，跳过"})
             continue
         try:
@@ -336,6 +341,12 @@ def run_for_pool(pool, *, do_accept: bool = True, do_claim: bool = True,
             travel_note = ""
             if do_travel:
                 travel_credit, travel_note = _travel_cycle(acct.credential, details)
+
+            # 顺手刷新该账号的养虾快照，供面板 V 展示（失败不影响主流程）
+            try:
+                acct.set_growth(query_state(acct.credential))
+            except Exception:
+                pass
 
             # 能量够就开新虾（上限 5 只），虾越多后续出行收益越高
             opened_note = ""
@@ -442,8 +453,9 @@ class GrowthScheduler:
         self._stop.set()
 
     def _loop(self) -> None:
-        # 启动后先等一轮，避免与启动期的余额刷新等操作抢资源
-        if self._stop.wait(120):
+        # 启动后稍等一下再跑首轮，避免与启动期的余额刷新等操作抢资源；
+        # 但也别等太久 —— 面板需要尽快拿到各账号的能量/虾 快照。
+        if self._stop.wait(20):
             return
         while not self._stop.is_set():
             try:
