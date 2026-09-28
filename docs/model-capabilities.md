@@ -27,7 +27,19 @@
 
 ## 一、模型清单
 
-网关默认暴露以下模型（`/v1/models`）：
+网关默认暴露 **24 个**模型（`/v1/models`），2026-09 起与 **WorkBuddy 官方模型清单同步**。
+
+清单来源与收录规则：
+- 从 WorkBuddy 桌面端 `resources/app.asar.unpacked/cli/product.json` 的 `models` 数组取全量（48 个），
+- 只保留**对话类**：`codewise-*`、`completion-gf`、`default-1.x`、`hunyuan-3b/7b-dense` 是代码补全模型，
+  `hunyuan-image-*`、`kling-*` 是图像/视频生成，均走不了 `/v2/chat/completions`，不收；
+- 再对候选逐个打后端探测：返回 `model [...] service info not found` 的剔除
+  （`glm-5.0`、`glm-4.7`、`glm-4.6`、`glm-4.6v`、`kimi-k2-thinking`、`minimax-m2.5`、
+  `deepseek-v3-1`、`deepseek-v3-1-volc`、`deepseek-r1-0528`）；
+- 另有 5 个 WorkBuddy 清单未列出、但本机后端仍注册的旧款，保留作向后兼容
+  （`glm-5.3`、`glm-5.3-flash`、`deepseek-v4.1-flash`、`minimax-m3-pay`、`hy3-preview-agent`）。
+
+### 1.1 本地实测验过的模型
 
 | 模型 ID | 视觉 | 推理档位 | 备注 |
 |---|:---:|:---:|---|
@@ -48,6 +60,28 @@
 | `auto` | ✓ | ✓ | 自动路由，实测支持视觉 |
 
 > **注**：上表的视觉列以 v6 双图交叉验证为准。`hunyuan-2.0-instruct` 多次明确回答"无法查看图片"，判定为不支持；`hy3-preview-agent` 在 v6 中也通过（两图均 shape=4/4），故一并声明 `image`。
+
+### 1.2 随 WorkBuddy 清单新接入的模型（**尚未本地实测**）
+
+以下模型可以正常调用（已逐个打后端验证连通），但**视觉与推理档位尚未在本地实测**，
+表中能力取自 WorkBuddy 官方 `product.json` 的 `supportsImages` 字段，仅供参考：
+
+| 模型 ID | 视觉（官方声明） | 备注 |
+|---|:---:|---|
+| `deepseek-v3-2-volc` | ✓ | 火山版 v3.2 |
+| `glm-5.0-turbo` | ✓ | |
+| `kimi-k3-1` | ✓ | kimi 最新一代（K3） |
+| `minimax-m3` | ✓ | |
+| `minimax-m2.7` | ✓ | |
+| `hy3` | ✓ | 混元 3 |
+| `hy3-preview` | ✓ | 混元 3 预览 |
+| `hunyuan-2.0-thinking` | ✓ | 混元 2.0 思考版 |
+| `hunyuan-chat` | ✓ | |
+
+> ⚠️ **官方声明 ≠ 实测**：`hunyuan-2.0-instruct` 官方同样标了 `supportsImages=true`，
+> 但本地 8 次调用全部明确回答"无法查看图片"。
+> 因此上表若与你的实际使用不符，请用第〇节的方法重新实测，并据此修正
+> `tools/apply_vision_config.py` 里的 `VISION_MODELS` / `NO_VISION_MODELS`。
 
 
 ---

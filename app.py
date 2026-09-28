@@ -1,8 +1,14 @@
 # -*- coding: utf-8 -*-
-"""CodeBuddy2API 桌面启动器：现代化深色 UI，一键拉起本地积分转换服务。
+"""CodeBuddy2API 桌面启动器：卡通渐变风格界面，一键拉起本地积分转换服务。
 
-使用 customtkinter 实现圆角卡片式界面。
-服务以子进程方式托管，关窗即停。
+界面是一张 562x792 的位图，贴在 tkinter Canvas 上显示：卡片圆角、角色遮挡、
+按钮立体感都来自 assets/ui/base.png 这张静态原画，ui_render 只把实时数据
+（URL、账号行、数值、账单）按实测坐标画上去。之所以不用现成的 GUI 组件，
+是因为要做出「压在渐变背景上的半透明卡片」，而常规控件只能填纯色。
+按钮不做成控件，而是用坐标做命中测试。
+
+素材可用 tools/build_ui_assets.py 从设计稿重新生成。
+服务在进程内以线程方式托管，关窗即停。
 """
 import json
 import os
@@ -48,7 +54,11 @@ def _run_selfcheck():
 if "--selfcheck" in sys.argv:
     raise SystemExit(_run_selfcheck())
 
-import customtkinter as ctk
+import tkinter as tk
+
+from PIL import ImageTk
+
+import ui_render
 
 # PyInstaller 打包后 __file__ 指向临时解压目录，配置文件须放 exe 所在目录
 if getattr(sys, "frozen", False):
@@ -72,6 +82,77 @@ def asset_path(name):
         if os.path.exists(p):
             return p
     return None
+
+
+def _short_event(msg):
+    """把事件类日志（签到、账号切换等）压成一行可读文案。"""
+    s = (msg or "").strip().splitlines()[0] if (msg or "").strip() else ""
+    for pfx in ("💰 ", "【CN自动同步】", "[CN自动同步]"):
+        if s.startswith(pfx):
+            s = s[len(pfx):]
+    return s[:28]
+
+
+def _parse_tokens(msg):
+    """从计费日志里抽出 token 明细，格式如「tok 337226+579=337805」。"""
+    try:
+        seg = msg.split("tok", 1)[1].split("|")[0].strip()
+        return "tok %s" % seg
+    except Exception:
+        return ""
+
+
+def fit_window(w, h, margin_w=48, margin_h=72):
+    """把窗口尺寸收进系统工作区，并在超宽屏上居中。
+
+    默认 620x880 在 1080p 上刚好，但 1366x768 这类小屏会超出屏幕底部，
+    导致按钮点不到——所以先按工作区裁剪，再计算居中偏移。
+    """
+    try:
+        import ctypes
+        try:
+            ctypes.windll.user32.SetProcessDPIAware()
+        except Exception:
+            pass
+        try:
+            rect = ctypes.wintypes.RECT()
+            ctypes.windll.user32.SystemParametersInfoW(48, 0, ctypes.byref(rect), 0)
+            aw, ah = rect.right - rect.left, rect.bottom - rect.top
+            ox, oy = rect.left, rect.top
+        except Exception:
+            aw = ctypes.windll.user32.GetSystemMetrics(0)
+            ah = ctypes.windll.user32.GetSystemMetrics(1)
+            ox = oy = 0
+        if aw <= 0 or ah <= 0:
+            return w, h, None
+        w = max(420, min(w, aw - margin_w))
+        h = max(560, min(h, ah - margin_h))
+        pos = "%d+%d" % (ox + max(0, (aw - w) // 2), oy + max(0, (ah - h) // 2))
+        return w, h, pos
+    except Exception:
+        return w, h, None
+
+
+def detect_scale():
+    """当前屏幕的 DPI 缩放系数（96 DPI = 1.0）。
+
+    自绘界面按逻辑坐标布局、按这个系数放大落笔，高分屏下才不会发虚。
+    读不到系统 DPI 时退回 1.0。
+    """
+    try:
+        import ctypes
+        try:                                    # Win10 1607+ per-monitor aware
+            dpi = ctypes.windll.user32.GetDpiForWindow(
+                ctypes.windll.kernel32.GetConsoleWindow() or 0)
+        except Exception:
+            dpi = 0
+        if not dpi:
+            dpi = ctypes.windll.user32.GetDpiForSystem()
+        if dpi:
+            return max(1.0, min(2.5, dpi / 96.0))
+    except Exception:
+        pass
+    return 1.0
 
 
 def set_window_icon(root):
@@ -109,6 +190,11 @@ def set_window_icon(root):
     except Exception:
         pass
     return False
+
+# 窗口圆角外的透明键色。素材 base.png 的四角已打上这个颜色，
+# 配合 -transparentcolor，窗口四角就是真正的圆角，
+# 而不是露出截图里的白底（会出现"白色尖角"）。
+TRANSPARENT_KEY = "#FF00FE"
 
 # 单实例互斥：Windows 全局 Mutex 名（固定字符串，跨实例识别）
 MUTEX_NAME = "Global\\CodeBuddy2API_RunMutex_8f3a"
@@ -155,110 +241,558 @@ class App:
         self._refresh_evt = threading.Event()
         self._refresh_flash_until = 0.0
         self.seen = set()
+        # 自绘界面状态
+        self._resizing = False
+        self._resize_job = None
+        self._last_size = None
+        self._last_redraw = 0.0
+        self._redraw_job = None
         self._build()
         self._start_service()
         threading.Thread(target=self._poll, daemon=True).start()
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
+        # 轮询线程把消息投进队列，这里周期性消费并重绘。
+        # 必须在 __init__ 里注册：放在 main() 里的话，任何别的入口
+        # （测试、被别的模块拉起）都会导致界面永远停在初始画面。
+        self.root.after(500, self._drain)
 
     def _build(self):
         self.root.title("CodeBuddy2API · 积分池网关")
-        # 加宽加高：账号行现在带养虾数据（⚡能量 🦐虾 连续天数），且不再截断到 6 个
-        self.root.geometry("560x760")
-        self.root.minsize(520, 640)
+
+        # 界面素材是固定构图的整幅画（562x792）：天空渐变、云朵、6 个 Q 版角色、
+        # 卡片、按钮、图标都取自参考图原画，不存在用控件拼装的可能，因此整窗就是
+        # 一张 Canvas 位图。窗口按素材长宽比呈现，只随 DPI 缩放。
+        self._scale = detect_scale()
+        self._renderer = ui_render.Renderer(scale=self._scale)
+        win_w, win_h = self._renderer.W, self._renderer.H
+        win_w, win_h, win_pos = fit_window(win_w, win_h,
+                                           margin_w=40, margin_h=80)
+        self.root.geometry("%dx%d%s" % (win_w, win_h,
+                                        ("+" + win_pos) if win_pos else ""))
+        # 常规尺寸，供「最大化」还原时兜底（见 _restore_from_max）。
+        # 此刻窗口尚未映射，位置可能是 0,0；_apply_transparency 里会再记一次真实值。
+        self._normal_geo = (win_w, win_h,
+                            self.root.winfo_x(), self.root.winfo_y())
+        self.root.minsize(int(win_w * 0.75), int(win_h * 0.75))
+        self.root.configure(bg=TRANSPARENT_KEY)
         set_window_icon(self.root)
+        # 素材自带标题栏与窗口按钮，因此隐藏系统标题栏，避免出现两条。
+        try:
+            self.root.overrideredirect(True)
+            self._borderless = True
+        except Exception:
+            self._borderless = False
+        # 让素材四角的键色真正透明 —— 窗口获得圆角。
+        # 放在 overrideredirect 之后设置，部分 Tk 版本需要窗口先无边框才生效。
+        try:
+            self.root.attributes("-transparentcolor", TRANSPARENT_KEY)
+        except Exception:
+            pass
+        # 无边框窗口默认不进任务栏，最小化后就找不回来了；
+        # 这里补上任务栏入口（见 _enable_taskbar）。放在透明色之后，
+        # 因为它内部会 hide/show 一次窗口。
+        self._enable_taskbar()
 
-        # 主容器
-        self.root.grid_columnconfigure(0, weight=1)
-        self.root.grid_rowconfigure(3, weight=1)
+        self.canvas = tk.Canvas(self.root, highlightthickness=0, bd=0,
+                                bg=TRANSPARENT_KEY, cursor="arrow")
+        self.canvas.pack(fill="both", expand=True)
+        self._canvas_img = None      # 必须保持引用，否则被 GC 回收会白屏
+        self._photo = None
+        self._frame = None           # 未贴按钮的底帧，供 hover 局部重绘
+        self._hover_key = None
+        self._rects = []
+        self._state = {
+            "status": "starting",
+            "subtitle": "正在等待后端就绪",
+            "addr": "—", "key": "—",
+            "pool": {"ok": 0, "total": 0, "cooldown": 0, "active": "—"},
+            "accounts": [], "bill": [],
+            "today_req": 0, "today_credit": 0,
+        }
 
-        # ---- 状态头 ----
-        hdr = ctk.CTkFrame(self.root, corner_radius=0, fg_color="transparent")
-        hdr.grid(row=0, column=0, sticky="ew", padx=16, pady=(16, 8))
-        self.lbl_dot = ctk.CTkLabel(hdr, text="●", text_color="#ffd60a",
-                                    font=ctk.CTkFont(size=20))
-        self.lbl_dot.pack(side="left")
-        self.lbl_state = ctk.CTkLabel(hdr, text="启动中…",
-                                      font=ctk.CTkFont(size=18, weight="bold"))
-        self.lbl_state.pack(side="left", padx=(4, 0))
-        self.lbl_sub = ctk.CTkLabel(hdr, text="",
-                                    font=ctk.CTkFont(size=11),
-                                    text_color="gray60")
-        self.lbl_sub.pack(side="left", padx=(8, 0), pady=(4, 0))
+        # 注意：<Button-1> 与 <ButtonPress-1> 在 Tk 里是**同一个事件**，
+        # 而 bind() 默认是「替换」不是「追加」——早先分别绑定
+        # _on_click（分派按钮）与 _on_press（拖动起点），后者把前者覆盖了，
+        # 结果所有按钮都点不动。现在统一由 _on_press 处理：先做命中分派，
+        # 未命中按钮且在标题栏时才进入拖动。
+        self.canvas.bind("<ButtonPress-1>", self._on_press)
+        self.canvas.bind("<Motion>", self._on_motion)
+        self.canvas.bind("<Leave>", lambda e: self._set_hover(None))
+        # 账号列表支持滚轮（账号多于可视行数时）
+        self.canvas.bind("<MouseWheel>", self._on_wheel)
+        self._acct_scroll = 0
+        self._bill_scroll = 0
+        self._state_scroll_reset = True
+        # 无边框窗口：标题栏区域拖动、右上角三个按钮自绘实现
+        self.canvas.bind("<B1-Motion>", self._on_drag)
+        # 双击标题栏切换最大化 —— 桌面软件的通用手势
+        self.canvas.bind("<Double-Button-1>", self._on_double_click)
+        self._drag_off = None
+        self._dragging = False
+        self._drag_pending = False
+        self._drag_job = None
+        self._drag_x = None
+        self._drag_y = None
+        self.root.bind("<ButtonRelease-1>", self._on_release)
+        self.root.bind("<Configure>", self._on_resize)
+        self.root.bind("<Map>", self._on_map)
+        self.root.bind("<Escape>", lambda e: self._on_close())
+        self._restore_borderless_pending = False
+        self._maxed = False
+        # 首帧渲染要几百毫秒。放到事件循环里做，让窗口先出现再出画面。
+        self.root.after(1, self._redraw)
+        # 窗口映射后再设一次透明色：部分 Tk 版本只在映射后应用才生效
+        self.root.after(60, self._apply_transparency)
 
-        # ---- 服务信息卡 ----
-        card = ctk.CTkFrame(self.root, corner_radius=14)
-        card.grid(row=1, column=0, sticky="ew", padx=16, pady=(0, 8))
-        card.grid_columnconfigure(0, weight=1)
-        self.lbl_addr = ctk.CTkLabel(card, text="", anchor="w",
-                                     font=ctk.CTkFont(family="Consolas", size=11))
-        self.lbl_addr.grid(row=0, column=0, sticky="ew", padx=14, pady=(10, 4))
-        # 用等宽字体，账号名/状态/余额/养虾数据列能对齐，扫一眼就看清
-        self.lbl_pool = ctk.CTkLabel(card, text="", anchor="w", justify="left",
-                                     font=ctk.CTkFont(family="Consolas", size=11),
-                                     text_color="gray80")
-        self.lbl_pool.grid(row=1, column=0, sticky="ew", padx=14, pady=(0, 10))
+    def _apply_transparency(self):
+        """窗口显示后再次应用透明色，确保四角圆角生效。"""
+        try:
+            self.root.attributes("-transparentcolor", TRANSPARENT_KEY)
+            self.canvas.configure(bg=TRANSPARENT_KEY)
+        except Exception:
+            pass
+        # 窗口已映射，此时的位置才是真实的：更新常规几何用于最大化还原兜底
+        try:
+            self._normal_geo = (self.root.winfo_width(),
+                                self.root.winfo_height(),
+                                self.root.winfo_x(), self.root.winfo_y())
+        except Exception:
+            pass
 
-        # ---- 统计双卡 ----
-        stat = ctk.CTkFrame(self.root, fg_color="transparent")
-        stat.grid(row=2, column=0, sticky="ew", padx=16, pady=(0, 8))
-        stat.grid_columnconfigure((0, 1), weight=1)
+    # -- 自绘界面：渲染 / 命中测试 / 交互 ------------------------------
+    def _redraw(self):
+        """把当前状态渲染成整窗位图。渲染较重，只在数据或尺寸变化时调用。
 
-        c1 = ctk.CTkFrame(stat, corner_radius=10)
-        c1.grid(row=0, column=0, sticky="ew", padx=(0, 4))
-        ctk.CTkLabel(c1, text="今日请求", text_color="gray60",
-                     font=ctk.CTkFont(size=10)).pack(padx=12, pady=(8, 0))
-        self.lbl_req = ctk.CTkLabel(c1, text="0",
-                                    font=ctk.CTkFont(size=22, weight="bold"))
-        self.lbl_req.pack(padx=12, pady=(0, 8))
+        拖动窗口期间直接返回：此时任何整窗重绘都会与窗口移动叠加成频闪，
+        数据变更由 _set_state 打标记，松手后 _on_release 会补一次。
+        """
+        if getattr(self, "_dragging", False):
+            self._drag_pending = True
+            return
+        try:
+            img = self._renderer.render(self._state)
+        except Exception:
+            import traceback
+            try:
+                with open(os.path.join(APP_DIR, "ui_render.log"), "w",
+                          encoding="utf-8") as f:
+                    f.write(traceback.format_exc())
+            except Exception:
+                pass
+            return
+        self._frame = img.copy()
+        self._blit(img)
+        # 按钮热区（物理像素），点击时用同一份版面数据做命中测试
+        self._rects = [(k, x * self._scale, y * self._scale,
+                        bw * self._scale, bh * self._scale)
+                       for (k, _lb, x, y, bw, bh, _ic)
+                       in self._renderer.button_rects()]
+        self._hover_key = None
 
-        c2 = ctk.CTkFrame(stat, corner_radius=10)
-        c2.grid(row=0, column=1, sticky="ew", padx=(4, 0))
-        ctk.CTkLabel(c2, text="积分消耗", text_color="gray60",
-                     font=ctk.CTkFont(size=10)).pack(padx=12, pady=(8, 0))
-        self.lbl_credit = ctk.CTkLabel(c2, text="0", text_color="#ffd60a",
-                                       font=ctk.CTkFont(size=22, weight="bold"))
-        self.lbl_credit.pack(padx=12, pady=(0, 8))
+    def _draw_button_labels(self, img):
+        """把动态按钮文案画到原画按钮上。
 
-        # ---- 账单流水 ----
-        ttl = ctk.CTkFrame(self.root, fg_color="transparent")
-        ttl.grid(row=3, column=0, sticky="nsew", padx=16, pady=(0, 8))
-        ttl.grid_columnconfigure(0, weight=1)
-        ttl.grid_rowconfigure(1, weight=1)
-        ctk.CTkLabel(ttl, text="实时账单", text_color="gray60",
-                     font=ctk.CTkFont(size=10, weight="bold")).grid(
-            row=0, column=0, sticky="w")
-        self.txt = ctk.CTkTextbox(ttl, corner_radius=10, font=ctk.CTkFont(
-            family="Consolas", size=11), wrap="word")
-        self.txt.grid(row=1, column=0, sticky="nsew")
-        self.txt.configure(state="disabled")
+        按钮底图（含图标、渐变、描边）是参考图原画，不能重画；
+        只有「停止服务/启动服务」这类文案会变，所以按版面坐标覆盖文字。
+        """
+        from PIL import ImageDraw, ImageFont
+        import ui_render as _ur
+        d = ImageDraw.Draw(img, "RGBA")
+        L = self._renderer.layout
+        s = self._scale
+        # 参考图原画里按钮文字已经画好；只有文案**确实不同**时才覆盖，
+        # 否则会出现「停止服务」和「停止服务」叠在一起的重影。
+        want = {
+            "stop": self._state.get("toggle_label", "停止服务"),
+            "refresh": self._state.get("refresh_label", "刷新"),
+            "checkin": self._state.get("checkin_label", "立即签到"),
+        }
+        origin = {"stop": "停止服务", "refresh": "刷新", "checkin": "立即签到"}
+        labels = {k: v for k, v in want.items() if v != origin[k]}
+        # 各按钮文字的左边界与中心（实测自参考图，扣掉左侧图标占位）
+        TXT = {"stop": (96, 711), "panel": (214, 711), "refresh": (340, 711),
+               "copy": (447, 711), "checkin": (250, 770)}
+        for b in L["buttons"]:
+            k = b["key"]
+            tx, ty = TXT.get(k, ((b["x0"] + b["x1"]) / 2, (b["y0"] + b["y1"]) / 2))
+            size = 17 if k != "checkin" else 19
+            f = _ur.load_font(max(9, int(size * s)), True)
+            d.text((tx * s, ty * s), labels.get(k, b["label"]), font=f,
+                   fill=(255, 255, 255, 255), anchor="lm")
 
-        # ---- 按钮 ----
-        btns = ctk.CTkFrame(self.root, fg_color="transparent")
-        btns.grid(row=4, column=0, sticky="ew", padx=16, pady=(0, 16))
-        btns.grid_columnconfigure((0, 1, 2, 3), weight=1)
-        self.btn_toggle = ctk.CTkButton(
-            btns, text="停止服务", command=self._on_toggle,
-            fg_color="#ff453a", hover_color="#cc3a30", corner_radius=8,
-            font=ctk.CTkFont(size=12))
-        self.btn_toggle.grid(row=0, column=0, sticky="ew", padx=(0, 4), pady=(0, 4))
-        self.btn_ui = ctk.CTkButton(
-            btns, text="管理面板", command=self._open_ui,
-            corner_radius=8, font=ctk.CTkFont(size=12))
-        self.btn_ui.grid(row=0, column=1, sticky="ew", padx=4, pady=(0, 4))
-        self.btn_refresh = ctk.CTkButton(
-            btns, text="↻ 刷新", command=self._refresh_now,
-            corner_radius=8, font=ctk.CTkFont(size=12),
-            fg_color="#2c6e49", hover_color="#22553a")
-        self.btn_refresh.grid(row=0, column=2, sticky="ew", padx=4, pady=(0, 4))
-        self.btn_copy = ctk.CTkButton(
-            btns, text="复制配置", command=self._copy,
-            corner_radius=8, font=ctk.CTkFont(size=12))
-        self.btn_copy.grid(row=0, column=3, sticky="ew", padx=(4, 0), pady=(0, 4))
-        self.btn_checkin = ctk.CTkButton(
-            btns, text="🎁 立即签到", command=self._checkin_now,
-            fg_color="#3a6f3a", hover_color="#2d5a2d", corner_radius=8,
-            font=ctk.CTkFont(size=12))
-        self.btn_checkin.grid(row=1, column=0, columnspan=4, sticky="ew", padx=0)
+    def _blit(self, img):
+        """把一张位图显示到画布上（维持引用，否则会被 GC 回收）。"""
+        self._photo = ImageTk.PhotoImage(img)
+        if self._canvas_img is None:
+            self._canvas_img = self.canvas.create_image(0, 0, anchor="nw",
+                                                        image=self._photo)
+        else:
+            self.canvas.itemconfigure(self._canvas_img, image=self._photo)
+            self.canvas.coords(self._canvas_img, 0, 0)
+
+    def _hit(self, px, py):
+        for k, x, y, w, h in self._rects:
+            if x <= px <= x + w and y <= py <= y + h:
+                return k
+        return None
+
+    def _on_click(self, ev):
+        k = self._hit(ev.x, ev.y)
+        if k == "stop":
+            self._on_toggle()
+        elif k == "panel":
+            self._open_ui()
+        elif k == "refresh":
+            self._refresh_now()
+        elif k == "copy":
+            self._copy()
+        elif k == "checkin":
+            self._checkin_now()
+        elif k == "win_min":
+            self._win_minimize()
+        elif k == "win_max":
+            self._win_toggle_max()
+        elif k == "win_close":
+            self._on_close()
+
+    # -- 无边框窗口的三个标题栏按钮（原画里画着，但系统不会代理点击）--
+    # Win32 常量（避免为几个数字引入额外的模块级依赖）
+    _GWL_EXSTYLE = -20
+    _WS_EX_APPWINDOW = 0x00040000
+    _WS_EX_TOOLWINDOW = 0x00000080
+    _SW_HIDE, _SW_SHOW, _SW_MINIMIZE, _SW_RESTORE = 0, 5, 6, 9
+    _SPI_GETWORKAREA = 48
+
+    def _win_hwnd(self):
+        """取顶层窗口的 Win32 HWND。
+
+        Tk 的 winfo_id() 给的是 Tk 自己的窗口，真正的顶层框架是它的父窗口
+        （无边框窗口也不例外），所以这里用 GetParent 上溯一层；
+        上溯结果为空说明本身就是顶层，直接用原值。
+        """
+        try:
+            import ctypes
+            h = self.root.winfo_id()
+            parent = ctypes.windll.user32.GetParent(h)
+            return parent or h
+        except Exception:
+            return None
+
+    def _enable_taskbar(self):
+        """给无边框窗口补上任务栏入口。
+
+        overrideredirect 窗口是 WS_POPUP，系统默认不把它登记到任务栏——
+        于是「最小化」之后用户再也找不回来（只能靠任务管理器）。
+        补一个 WS_EX_APPWINDOW 正是该扩展样式的用途；改完必须 hide/show
+        一次，任务栏才会重新登记。
+        """
+        h = self._win_hwnd()
+        if not h:
+            return
+        try:
+            import ctypes
+            u = ctypes.windll.user32
+            ex = u.GetWindowLongW(h, self._GWL_EXSTYLE)
+            u.SetWindowLongW(h, self._GWL_EXSTYLE,
+                             (ex | self._WS_EX_APPWINDOW)
+                             & ~self._WS_EX_TOOLWINDOW)
+            u.ShowWindow(h, self._SW_HIDE)
+            u.ShowWindow(h, self._SW_SHOW)
+        except Exception:
+            pass
+
+    def _win_minimize(self):
+        """最小化到任务栏（与普通桌面软件一致，点任务栏图标即可还原）。"""
+        h = self._win_hwnd()
+        if h:
+            try:
+                import ctypes
+                ctypes.windll.user32.ShowWindow(h, self._SW_MINIMIZE)
+                return
+            except Exception:
+                pass
+        try:
+            self.root.iconify()
+        except Exception:
+            pass
+
+    def _work_area(self):
+        """系统工作区（已排除任务栏），返回 (x, y, w, h)。"""
+        try:
+            import ctypes
+            from ctypes import wintypes
+            u = ctypes.windll.user32
+            try:
+                u.SetProcessDPIAware()
+            except Exception:
+                pass
+            r = wintypes.RECT()
+            u.SystemParametersInfoW(self._SPI_GETWORKAREA, 0, ctypes.byref(r), 0)
+            w, h = r.right - r.left, r.bottom - r.top
+            if w > 0 and h > 0:
+                return r.left, r.top, w, h
+        except Exception:
+            pass
+        return 0, 0, self.root.winfo_screenwidth(), self.root.winfo_screenheight()
+
+    def _max_target(self):
+        """最大化的目标尺寸与位置：等比铺满工作区并居中。
+
+        用素材的**逻辑长宽比**计算，与当前 scale 无关。
+        """
+        ox, oy, aw, ah = self._work_area()
+        ratio = self._renderer.lw / float(self._renderer.lh)
+        h = ah
+        w = int(round(h * ratio))
+        if w > aw:
+            w = aw
+            h = int(round(w / ratio))
+        return w, h, ox + (aw - w) // 2, oy + (ah - h) // 2
+
+    def _is_maxed_now(self):
+        """按「当前尺寸是否等于最大化目标尺寸」判断，而不是只看标志位。
+
+        标志位可能因为外部还原（任务栏还原、显示器切换）而与实际尺寸失配，
+        只信标志位会出现「点最大化没反应」。
+        """
+        w, h, _x, _y = self._max_target()
+        return (abs(self.root.winfo_width() - w) <= 4
+                and abs(self.root.winfo_height() - h) <= 4)
+
+    def _restore_from_max(self):
+        """从最大化还原到之前的位置与尺寸。"""
+        nw, nh, nx, ny = getattr(self, "_normal_geo",
+                                 (self._renderer.W, self._renderer.H, 0, 0))
+        w = getattr(self, "_rest_w", None) or nw
+        h = getattr(self, "_rest_h", None) or nh
+        x = getattr(self, "_rest_x", None)
+        y = getattr(self, "_rest_y", None)
+        if x is None or y is None:
+            x, y = nx, ny
+        # 记录的尺寸若本身就是最大化尺寸（状态失配），退回启动时的常规尺寸
+        tw, th, _tx, _ty = self._max_target()
+        if abs(w - tw) <= 4 and abs(h - th) <= 4:
+            w, h = nw, nh
+        try:
+            self.root.geometry("%dx%d+%d+%d" % (w, h, x, y))
+        except Exception:
+            pass
+        self._maxed = False
+
+    def _on_map(self, ev=None):
+        """从任务栏还原后，重新套用无边框 + 四角透明。"""
+        if not getattr(self, "_restore_borderless_pending", False):
+            return
+        self._restore_borderless_pending = False
+        try:
+            self.root.overrideredirect(True)
+            self._borderless = True
+        except Exception:
+            pass
+        self.root.after(30, self._apply_transparency)
+        self.root.after(60, self._redraw)
+
+    def _win_toggle_max(self):
+        """最大化 / 还原。
+
+        素材是固定长宽比的整幅插画，拉伸会变形，所以「最大化」取
+        **能塞进系统工作区的最大等比尺寸**并居中 —— 这与看图软件/播放器的
+        「适应窗口」一致，纵向正好顶到工作区的上下边，不再留之前那种
+        「94% 高度 + 整体上移 12px」的怪偏移。
+        """
+        # 已最大化（按尺寸判定，标志位可能失配）→ 还原
+        if self._is_maxed_now():
+            self._restore_from_max()
+            return
+        try:
+            # 记录当前常规尺寸，供还原使用
+            self._rest_w = self.root.winfo_width()
+            self._rest_h = self.root.winfo_height()
+            self._rest_x = self.root.winfo_x()
+            self._rest_y = self.root.winfo_y()
+            w, h, x, y = self._max_target()
+            self.root.geometry("%dx%d+%d+%d" % (w, h, x, y))
+            self._maxed = True
+        except Exception:
+            pass
+
+    def _set_hover(self, key):
+        if key == self._hover_key:
+            return
+        self._hover_key = key
+        self.canvas.configure(cursor="hand2" if key else "arrow")
+        self._paint_buttons()
+
+    def _paint_buttons(self, base=None):
+        """只重绘按钮区域，供 hover 即时响应使用。
+
+        整窗重绘一次要几十毫秒，鼠标划过时必须避免。这里从上一帧已合成的
+        整窗图（_frame）出发，把高亮/常态按钮图贴到各自的矩形上。按钮彼此
+        不重叠，所以逐个覆盖互不影响。
+        """
+        base = base if base is not None else self._frame
+        if base is None:
+            return
+        from PIL import Image, ImageDraw
+        img = base.copy()
+        d = ImageDraw.Draw(img, "RGBA")
+        s = self._scale
+        for k, _lb, x, y, bw, bh, _ic in self._renderer.button_rects():
+            if k != self._hover_key:
+                continue
+            # 悬停：叠一层白色高光 + 轻微上移的亮边，保持与底图同样的圆角
+            d.rounded_rectangle([x * s, y * s, (x + bw) * s, (y + bh) * s],
+                                radius=int(11 * s), fill=(255, 255, 255, 46))
+        self._blit(img)
+
+    def _on_press(self, ev):
+        """鼠标左键按下：先分派按钮点击，否则在标题栏进入拖动。
+
+        合并的原因见 _build 里的说明：<Button-1> 与 <ButtonPress-1> 是同一
+        事件，只能绑定一个处理器，否则后者会把前者覆盖掉（按钮将全部失效）。
+        """
+        k = self._hit(ev.x, ev.y)
+        if k:
+            # 命中按钮：走点击逻辑，不进入拖动
+            self._on_click(ev)
+            return
+        if self._borderless and ev.y < 34 * self._scale:
+            self._drag_off = (ev.x, ev.y)
+            self._win_off = (self.root.winfo_x(), self.root.winfo_y())
+            # 进入拖动状态：期间暂停一切整窗重绘（见 _on_drag 说明）
+            self._dragging = True
+
+    def _on_double_click(self, ev):
+        """双击标题栏空白处切换最大化（与按最大化按钮等效）。"""
+        if not self._borderless:
+            return
+        if self._hit(ev.x, ev.y):
+            return                    # 落在按钮上：交给按钮处理
+        if ev.y < 34 * self._scale:
+            self._win_toggle_max()
+
+    def _on_release(self, _ev=None):
+        """松开鼠标：结束拖动状态，并把拖动期间压下的重绘补上。"""
+        if not getattr(self, "_dragging", False):
+            return
+        self._dragging = False
+        self._drag_off = None
+        self._drag_pending = False
+        # 拖动结束后强制刷新一次，保证界面回到最新状态
+        self._last_redraw = 0.0
+        self._redraw()
+
+    def _on_drag(self, ev):
+        """拖动窗口。
+
+        频闪的根因在这段与重绘的叠加：
+          1) <B1-Motion> 的频率可达 100+ 次/秒，每次都 geometry() 会让
+             窗口在移动中不断重排；
+          2) 同一时刻 _on_motion 仍会把 hover 变化转成 _paint_buttons()，
+             而它要**重建整窗 PhotoImage（约 1.8MB）**再 itemconfigure——
+             这个"移动窗口 + 换整窗位图"的组合就是肉眼看到的频闪；
+          3) 后台 _drain 每 250ms 的整窗 PIL 渲染（几十毫秒）会落在拖动中途。
+        因此：拖动期间不响应 hover、不做整窗重绘，并把 geometry 节流到
+        约 60fps；拖动结束再统一刷新一次。
+        """
+        if not (self._drag_off and getattr(self, "_win_off", None)):
+            return
+        # 最大化状态下拖标题栏：先还原成普通尺寸再跟手 —— 与 Windows 一致。
+        if getattr(self, "_maxed", False):
+            self._restore_from_max()
+            self._drag_off = (ev.x, ev.y)
+            self._win_off = (self.root.winfo_x(), self.root.winfo_y())
+        self._drag_x = self._win_off[0] + ev.x - self._drag_off[0]
+        self._drag_y = self._win_off[1] + ev.y - self._drag_off[1]
+        # 合并同一轮事件循环里的多次移动，只提交最后一次
+        if self._drag_job is None:
+            self._drag_job = self.root.after(16, self._flush_drag)
+
+    def _flush_drag(self):
+        self._drag_job = None
+        if not getattr(self, "_dragging", False):
+            return
+        if getattr(self, "_drag_x", None) is None:
+            return
+        try:
+            self.root.geometry("+%d+%d" % (self._drag_x, self._drag_y))
+        except Exception:
+            pass
+
+    def _on_wheel(self, ev):
+        """滚轮分别滚动账号列表与实时账单。
+
+        指针落在哪个区域就滚哪个；两个区域都只在内容超出可视行数时响应，
+        避免误吞其它地方的滚动事件。
+        """
+        x, y = ev.x / self._scale, ev.y / self._scale
+        step = -1 if getattr(ev, "delta", 0) > 0 else 1
+
+        # --- 账号区 ---
+        scfg = self._renderer.layout["svc"]
+        rows = self._state.get("accounts") or []
+        cap = scfg["rows_max"]
+        if (len(rows) > cap and 20 <= x <= scfg["col_end"] + 12
+                and scfg["row0_cy"] - 14 <= y
+                <= scfg["row0_cy"] + cap * scfg["row_h"]):
+            off = max(0, min(self._acct_scroll + step, len(rows) - cap))
+            if off != self._acct_scroll:
+                self._acct_scroll = off
+                self._state["acct_scroll"] = off
+                self._redraw()
+            return
+
+        # --- 账单区 ---
+        bcfg = self._renderer.layout["bill"]
+        bills = self._state.get("bill") or []
+        bcap = bcfg["rows_max"]
+        if (len(bills) > bcap
+                and bcfg["row0_cy"] - 14 <= y
+                <= bcfg["row0_cy"] + bcap * bcfg["row_h"]
+                and 20 <= x <= bcfg.get("col_end", 466) + 80):
+            off = max(0, min(self._bill_scroll + step, len(bills) - bcap))
+            if off != self._bill_scroll:
+                self._bill_scroll = off
+                self._state["bill_scroll"] = off
+                self._redraw()
+
+    def _on_motion(self, ev):
+        # 拖动窗口时不处理悬停：hover 一变就要重建整窗位图，
+        # 与窗口移动叠加会明显频闪（见 _on_drag 注释）。
+        if getattr(self, "_dragging", False):
+            return
+        self._set_hover(self._hit(ev.x, ev.y))
+
+    def _on_resize(self, ev):
+        """窗口尺寸变化后重算缩放系数。
+
+        素材是固定构图的整幅画，不能拉伸变形——按「窗口宽度 / 素材宽度」
+        等比缩放，这样任意窗口尺寸下版面比例都与参考图一致。
+        """
+        if ev.widget is not self.root:
+            return
+        if ev.width < 40 or ev.height < 40:
+            return
+        if (ev.width, ev.height) == self._last_size:
+            return
+        self._last_size = (ev.width, ev.height)
+        # 防抖：拖拽窗口时 Configure 会高频触发，而重渲染开销不小
+        if self._resize_job:
+            try:
+                self.root.after_cancel(self._resize_job)
+            except Exception:
+                pass
+        self._resize_job = self.root.after(140, self._apply_resize)
+
+    def _apply_resize(self):
+        self._resize_job = None
+        w, h = self._last_size or (self._renderer.W, self._renderer.H)
+        base_w, base_h = self._renderer.lw, self._renderer.lh
+        sc = min(w / base_w, h / base_h) * detect_scale()
+        sc = max(0.55, min(2.5, sc))
+        if abs(sc - self._scale) > 0.02 and self._renderer.resize(None, None, sc):
+            self._scale = sc
+            self._redraw()
 
     # -- 服务生命周期（进程内启动，适配 PyInstaller 打包） ----------
     def _start_service(self):
@@ -305,28 +839,31 @@ class App:
 
         只触发轮询线程立刻再跑一轮；服务本身不动，所以不会中断正在处理的请求。
         """
-        self.btn_refresh.configure(text="刷新中…", state="disabled")
+        self._set_state(refresh_label="刷新中…")
         # 立刻给出可见反馈，并立刻用闪烁副本覆盖 1 秒的轮询文案；
         # 不依赖轮询成功与否，否则后端异常时按钮像是没反应。
         stamp = time.strftime("%H:%M:%S")
         self._refresh_flash_until = time.time() + 3.0
-        self.lbl_sub.configure(text="✔ 已刷新 · " + stamp)
+        # 立刻把文案切到「已刷新」，不要等下一轮轮询，否则按钮像是没反应
+        self._set_state(subtitle="✔ 已刷新 · " + stamp)
         self._refresh_evt.set()
         self.root.after(1200, self._refresh_done)
 
     def _refresh_done(self):
-        self.btn_refresh.configure(text="↻ 刷新", state="normal")
+        # 无论轮询是否成功，按钮文案都要复位，否则会一直停在「刷新中…」
+        self._set_state(refresh_label="刷新", redraw=True)
 
     def _copy(self):
         txt = ("Base URL : %s/v1\nAPI Key  : %s\n"
-               "Models   : glm-5.2, kimi-k2.7, deepseek-v4-pro, auto"
+               "Models   : deepseek-v4-pro, deepseek-v4-flash, glm-5.2, "
+               "kimi-k2.7, kimi-k3-1, minimax-m3, hunyuan-2.0-instruct, auto"
                % (self.base, self.key))
         self.root.clipboard_clear()
         self.root.clipboard_append(txt)
 
     def _checkin_now(self):
         """手动立即签到：调用后端 /api/billing/checkin（后台线程，不卡 UI）。"""
-        self.btn_checkin.configure(state="disabled", text="签到中…")
+        self._set_state(checkin_label="签到中…")
         threading.Thread(target=self._checkin_worker, daemon=True).start()
 
     def _checkin_worker(self):
@@ -339,6 +876,7 @@ class App:
             with urllib.request.urlopen(req, timeout=20) as resp:
                 r = json.loads(resp.read().decode("utf-8", "replace"))
         except Exception as e:
+            self.q.put(("state", "reset_checkin"))
             self.q.put(("addresult", ("签到", "签到失败：%s" % e)))
             return
         lines = []
@@ -392,132 +930,168 @@ class App:
         self.root.after(500, self._drain)
 
     def _apply(self, item):
+        """消费轮询线程投递的消息，更新状态字典后触发一次重绘。"""
         kind = item[0]
         if kind == "state":
-            self._render_state(item[1])
+            if item[1] == "reset_checkin":
+                self._set_state(checkin_label="立即签到")
+            else:
+                self._render_state(item[1])
         elif kind == "addresult":
             import tkinter.messagebox as mb
-            self.btn_checkin.configure(state="normal", text="🎁 立即签到")
+            self._set_state(checkin_label="立即签到")
             title, body = item[1]
             mb.showinfo(title, body)
         elif kind == "wait":
-            self.lbl_dot.configure(text_color="#ffd60a")
-            self.lbl_state.configure(text="服务启动中…")
-            self.lbl_sub.configure(text="正在等待后端就绪")
-            self.btn_toggle.configure(text="停止服务")
+            self._set_state(status="starting", subtitle="正在等待后端就绪",
+                            toggle_label="停止服务")
         elif kind == "down":
-            self.lbl_dot.configure(text_color="#ff453a")
-            self.lbl_state.configure(text="服务未运行")
-            self.lbl_sub.configure(text="")
-            self.btn_toggle.configure(text="启动服务")
+            self._set_state(status="stopped", subtitle="点击下方「启动服务」",
+                            toggle_label="启动服务")
         elif kind == "ok":
             _, alive, st, accts, stats, logs, bill = item
             self._render_ok(st, accts, stats, logs, bill)
 
+    def _set_state(self, redraw=True, **kw):
+        # 按钮文案的临时态（如「刷新中…」）要有反馈，见 _refresh_now/_checkin_now
+        """更新状态；未显式要求时合并本轮的多次更新，只重绘一次。"""
+        self._state.update(kw)
+        if not redraw:
+            return
+        # 拖动窗口期间不重绘：整窗渲染要几十毫秒，与窗口移动叠加会频闪。
+        # 数据照常更新，只置一个标记，松手后由 _on_release 统一补一次。
+        if getattr(self, "_dragging", False):
+            self._drag_pending = True
+            return
+        now = time.time()
+        if self._redraw_job:
+            return
+        # 轮询频率 1s，渲染节流到 4 次/秒以内即可，避免无谓的整窗重绘
+        delay = max(0, int((0.25 - (now - self._last_redraw)) * 1000))
+        self._redraw_job = self.root.after(delay, self._flush_redraw)
+
+    def _flush_redraw(self):
+        self._redraw_job = None
+        self._last_redraw = time.time()
+        self._redraw()
+
     def _render_state(self, s):
         if s == "running":
-            self.lbl_dot.configure(text_color="#ffd60a")
-            self.lbl_state.configure(text="服务启动中…")
-            self.lbl_sub.configure(text="正在等待后端就绪")
-            self.btn_toggle.configure(text="停止服务")
+            self._set_state(status="starting", subtitle="正在等待后端就绪",
+                            toggle_label="停止服务")
         elif s == "stopped":
-            self.lbl_dot.configure(text_color="#ff453a")
-            self.lbl_state.configure(text="服务已停止")
-            self.lbl_sub.configure(text="点击下方「启动服务」")
-            self.lbl_addr.configure(text="")
-            self.lbl_pool.configure(text="")
-            self.btn_toggle.configure(text="启动服务")
+            self._set_state(status="stopped", subtitle="点击下方「启动服务」",
+                            addr="—", key="—",
+                            pool={"ok": 0, "total": 0, "cooldown": 0, "active": "—"},
+                            accounts=[], bill=[], toggle_label="启动服务")
         elif s.startswith("error"):
-            self.lbl_dot.configure(text_color="#ff453a")
-            self.lbl_state.configure(text="启动失败")
-            self.lbl_addr.configure(text=s[6:])
-            self.btn_toggle.configure(text="重试启动")
+            self._set_state(status="error", subtitle=s[6:] or "启动失败",
+                            toggle_label="重试启动")
 
     def _render_ok(self, st, accts, stats, logs, bill=None):
-        self.lbl_dot.configure(text_color="#34c759")
-        self.lbl_state.configure(text="服务运行中")
         sub = time.strftime("已运行 %Hh%Mm", time.gmtime(st.get("uptime", 0)))
         if bill and bill.get("scheduler_running"):
             lr = bill.get("last_run") or ""
             if lr:
                 sub += " · 每日签到 %s" % lr
-        # 手动刷新的反馈要压住轮询文案，否则提示会在 1 秒内被覆盖掉
-        if time.time() < getattr(self, "_refresh_flash_until", 0):
+        # 手动刷新的反馈要压住轮询文案，否则提示会在 1 秒内被覆盖
+        if time.time() < self._refresh_flash_until:
             sub = "✔ 已刷新 · " + time.strftime("%H:%M:%S")
-        self.lbl_sub.configure(text=sub)
-        self.btn_toggle.configure(text="停止服务")
+
         ps = (accts or {}).get("pool_stats", {}) or {}
-        active = accts.get("active_name", "?")
-        self.lbl_addr.configure(text="地址  %s/v1\nKey   %s" % (self.base, self.key))
-        ok = ps.get("ok", 0)
-        tot = ps.get("total", 0)
-        cool = ps.get("cooldown", 0)
-        # 展示全部账号（原先硬编码 [:6] 会截断，账号一多就看不到后面的）。
-        # 每行附带养虾数据：⚡能量 / 🦐虾数 / 连续签到天数。
-        rows = []
-        all_accts = accts.get("accounts") or []
-        for a in all_accts:
+        active_id = accts.get("active_id")
+        accounts = []
+        for a in (accts.get("accounts") or []):
             nm = a.get("name", "?")
-            # 过长的名字（企业号常是完整邮箱）压到 10 字符内，避免撑乱等宽列。
+            # 过长的名字（企业号常是完整邮箱）压到 10 字符内，避免撑乱列。
             # 注意保留「尾部」——多个企业号往往只有结尾数字不同
             # （WeChatGame8/9/10），截头去尾会全部变成同一个名字。
             if len(nm) > 10:
                 local = nm.split("@", 1)[0] if "@" in nm else nm
                 nm = local[:2] + "…" + local[-5:] if len(local) > 7 else nm[:9] + "…"
-            h = a.get("health", "?")
-            sp = a.get("credit_spent", 0)
             rc = a.get("real_credit")
-            star = "★ " if a.get("id") == accts.get("active_id") else "   "
-            hicon = {"ok": "✓", "exhausted": "✗", "cooldown": "⏳"}.get(h, "•")
             if rc is not None:
                 bal = "真实 %s" % rc
             elif a.get("real_credit_note"):
                 bal = "企业版"
             else:
-                bal = "累计 %s" % sp
-            # 养虾数据：企业账号 or 尚未采集时不显示
+                bal = "累计 %s" % a.get("credit_spent", 0)
+            # 养虾数据：企业账号或尚未采集时不显示
             g = a.get("growth") or {}
-            if g and not g.get("note"):
-                bal += "  ⚡%s 🦐%s" % (g.get("energy", 0), g.get("buddies", 0))
-                sd = g.get("streak_days")
-                if sd is not None:
-                    bal += " 连%s天" % sd
-            rows.append("%s%-10s %s %-9s %s" % (star, nm, hicon, h, bal))
-        self.lbl_pool.configure(text="账号池 %s/%s（冷却%s） · 主力 %s\n%s" % (
-            ok, tot, cool, active, "\n".join(rows)))
-        self.lbl_req.configure(text=str((stats or {}).get("today_requests", 0)))
-        self.lbl_credit.configure(text=str((stats or {}).get("today_credit", 0)))
+            has_g = bool(g) and not g.get("note")
+            hh = a.get("health", "ok")
+            accounts.append({
+                "name": nm,
+                "health": hh,
+                # 参考图里状态列显示的是「ok」，对勾由图标位承载
+                "state": {"ok": "ok", "exhausted": "耗尽",
+                          "cooldown": "冷却"}.get(hh, hh),
+                "bal": bal,
+                "active": a.get("id") == active_id,
+                "growth": has_g,
+                "energy": g.get("energy", 0) if has_g else "",
+                "buddies": g.get("buddies", 0) if has_g else "",
+                "streak": ("连%s天" % g.get("streak_days")) if has_g
+                          and g.get("streak_days") is not None else "",
+            })
 
-        # 账单流水
-        new = []
+        pool = {"ok": ps.get("ok", 0), "total": ps.get("total", 0),
+                "cooldown": ps.get("cooldown", 0),
+                "active": accts.get("active_name", "?")}
+
+        # 账单流水。注意 level="credit" 同时也被签到等事件复用（model 为空、
+        # 积分为 0），这类不是计费行——按有无 model 区分，否则账单里会混进
+        # 一堆 "0.0000 分" 的干扰行。
+        items = []
         for it in logs:
             lvl = it.get("level", "info")
             if lvl not in ("credit", "error", "warn"):
                 continue
-            k = "%s|%s|%s" % (it.get("ts"), lvl, it.get("msg", "")[:90])
-            if k in self.seen:
+            model = (it.get("model") or "").strip()
+            c = float(it.get("credit") or 0)
+            billed = bool(model) and c > 0
+            if lvl == "credit" and not billed:
+                # 事件类（签到、账号切换…）：没有模型与分值，按要求归入告警列
+                items.append({
+                    "time": it.get("time", ""),
+                    "model": _short_event(it.get("msg", "")),
+                    "meta": _short_event(it.get("msg", ""))[:20],
+                    "tokens": "",
+                    "credit": "事件",
+                    "level": "warn" if lvl == "credit" else lvl,
+                })
                 continue
-            self.seen.add(k)
-            if len(self.seen) > 4000:
-                self.seen = set(list(self.seen)[-2000:])
-            icon = {"credit": "💰", "error": "❌", "warn": "⚠️"}.get(lvl, "")
-            new.append("%s  %s  %s" % (it.get("time", ""), icon,
-                                       it.get("msg", "").split("\n")[0]))
-        if new:
-            self.txt.configure(state="normal")
-            for line in new:
-                self.txt.insert("end", line + "\n")
-            try:
-                ln = int(self.txt.index("end-1c").split(".")[0])
-                if ln > 300:
-                    self.txt.delete("1.0", "%d.0" % (ln - 300))
-            except Exception:
-                pass
-            self.txt.see("end")
-            self.txt.configure(state="disabled")
+            items.append({
+                "time": it.get("time", ""),
+                "rid": it.get("rid", ""),
+                "model": model or "-",
+                # 渲染器单独画「tok」标签，这里只给数字，避免重复
+                "tokens": _parse_tokens(it.get("msg", "")).replace("tok ", ""),
+                "credit": "%.4f 分" % c if c else lvl,
+                "level": lvl,
+            })
+        # 总线是时间序，界面要新记录在最上面
+        items.reverse()
+
+        self._set_state(
+            status="running", subtitle=sub,
+            addr="%s/v1" % self.base, key=self.key,
+            pool=pool,
+            accounts=accounts,
+            today_req=(stats or {}).get("today_requests", 0),
+            today_credit=(stats or {}).get("today_credit", 0),
+            bill=items or self._state.get("bill") or [],
+            toggle_label="停止服务",
+        )
 
     def _on_close(self):
         self.stop_evt.set()
+        for job in (self._redraw_job, self._resize_job):
+            if job:
+                try:
+                    self.root.after_cancel(job)
+                except Exception:
+                    pass
         try:
             import converter
             converter.stop()
@@ -572,11 +1146,8 @@ def main():
     except Exception:
         pass  # 非 Windows 或创建失败时退化为多实例，不强求
     try:
-        ctk.set_appearance_mode("dark")
-        ctk.set_default_color_theme("green")
-        root = ctk.CTk()
+        root = tk.Tk()
         app = App(root)
-        root.after(500, app._drain)
         root.mainloop()
     except Exception:
         with open(crash, "w", encoding="utf-8") as f:

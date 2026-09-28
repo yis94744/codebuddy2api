@@ -1,3 +1,6 @@
 fastapi
 uvicorn[standard]
 httpx
+# 桌面启动器（app.py）的界面是自绘的：Pillow 负责渲染，
+# tkinter 是标准库自带，无需声明。
+Pillow

@@ -64,7 +64,9 @@ MODULES = [
     ("certifi", "CA 证书包", True),
     # --- GUI ---
     ("tkinter", "GUI 基础库", True),
-    ("customtkinter", "GUI 工具包", True),
+    ("PIL.Image", "界面自绘（Pillow）", True),
+    ("PIL.ImageTk", "位图贴到 Canvas", True),
+    ("ui_render", "界面渲染", True),
     # --- 标准库中被打包器容易漏的 ---
     ("sqlite3", "本地存储", True),
     # --- 本项目模块 ---

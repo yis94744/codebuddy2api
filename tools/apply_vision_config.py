@@ -26,12 +26,20 @@ except Exception:
 DSH = pathlib.Path.home() / ".dsh"
 SETTINGS = DSH / "settings.yaml"
 
-# ---- 实测支持视觉的模型（v6 双图交叉验证结论，见 _vision_result6.json）----
-# 判定标准：在两张**反直觉**测试图上分别答对形状——
-#   图A：右下角实心圆（非左上、非方块）  图B：上方水平粗线（非对角线）
-# 猜中一张可能靠运气，两张都答对则几乎不可能是幻觉。
-# 实测 14/15 模型在两张图上均 shape=4/4 命中。
+# ---- 支持视觉的模型 ----
+# 判定分两级，来源不同，**不要混为一谈**：
+#
+# ① 本地实测（v6 双图交叉验证，见 _vision_result6.json）
+#    判定标准：在两张**反直觉**测试图上分别答对形状——
+#      图A：右下角实心圆（非左上、非方块）  图B：上方水平粗线（非对角线）
+#    猜中一张可能靠运气，两张都答对则几乎不可能是幻觉。
+#    实测 14/15 模型在两张图上均 shape=4/4 命中。
+#
+# ② WorkBuddy 官方 product.json 的 supportsImages 字段（2026-09 同步）
+#    本批新增模型只按官方声明登记，**尚未本地实测**；若发现实际不支持，
+#    应移到 NO_VISION_MODELS 并在此注明。
 VISION_MODELS = {
+    # ① 本地实测验过
     "glm-5.3",
     "glm-5.3-flash",
     "glm-5.2",
@@ -46,21 +54,41 @@ VISION_MODELS = {
     "minimax-m3-pay",
     "hy3-preview-agent",
     "auto",
+    # ② WorkBuddy 官方声明支持视觉（未本地实测）
+    "deepseek-v3-2-volc",
+    "glm-5.0-turbo",
+    "kimi-k3-1",
+    "minimax-m3",
+    "minimax-m2.7",
+    "hy3",
+    "hy3-preview",
+    "hunyuan-2.0-thinking",
+    "hunyuan-chat",
 }
 
 # 实测确实看不到图的模型：不声明 image，让客户端在发送前就拦下图片
-# hunyuan-2.0-instruct：8 次调用全部明确回答 "unable to view or analyze images"
+# hunyuan-2.0-instruct：官方 product.json 标了 supportsImages=true，
+# 但本地 8 次调用全部明确回答 "unable to view or analyze images" —— 以实测为准。
 NO_VISION_MODELS = {
     "hunyuan-2.0-instruct",
 }
 
-ALL_MODELS = [
-    "glm-5.3", "glm-5.3-flash", "glm-5.2", "glm-5.1", "glm-5v-turbo",
-    "kimi-k2.7", "kimi-k2.6", "kimi-k2.5",
-    "deepseek-v4.1-flash", "deepseek-v4-pro", "deepseek-v4-flash",
-    "hunyuan-2.0-instruct",
-    "minimax-m3-pay", "hy3-preview-agent", "auto",
-]
+# 模型清单直接取自网关（converter.DEFAULT_MODELS），避免两处名单各写一份而漂移。
+try:
+    sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
+    from converter import DEFAULT_MODELS as ALL_MODELS
+except Exception:                                       # 独立运行时的兜底
+    ALL_MODELS = [
+        "deepseek-v4-pro", "deepseek-v4-flash", "deepseek-v3-2-volc",
+        "glm-5.2", "glm-5.1", "glm-5.0-turbo", "glm-5v-turbo",
+        "kimi-k3-1", "kimi-k2.7", "kimi-k2.6", "kimi-k2.5",
+        "hunyuan-2.0-instruct", "hunyuan-2.0-thinking", "hunyuan-chat",
+        "minimax-m3", "minimax-m2.7",
+        "hy3", "hy3-preview",
+        "glm-5.3", "glm-5.3-flash", "deepseek-v4.1-flash",
+        "minimax-m3-pay", "hy3-preview-agent",
+        "auto",
+    ]
 
 REASONING = ("low", "medium", "high", "xhigh", "max")
 

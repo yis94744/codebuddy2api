@@ -277,10 +277,35 @@ uv run converter.py --desensitize --log converter.log
 账号池会自动扫描本机所有 `*.info` 登录态。多账号场景建议用 `--prefer 名称` 指定主账号：
 
 ```bash
-python3 converter.py --desensitize --prefer "烟逝"
+python3 converter.py --desensitize --prefer "你的账号名"
 ```
 
 > 提示：桌面端每次新登录都会生成新的 `*.info` 目录，账号池会自动发现并纳入管理，也可在面板里禁用旧账号。
+
+---
+
+## 桌面启动器（GUI）
+
+除了命令行，项目还带一个桌面启动器：双击 `一键启动.bat`，或运行 `python app.py`，
+也可以直接用打包好的 `CodeBuddy2API.exe`。窗口里就能看到服务状态、账号池、
+今日请求与积分、实时账单，以及「停止/启动服务」「管理面板」「刷新」
+「复制配置」「立即签到」五个操作。
+
+界面沿用「天空渐变 + 云朵 + 角落 Q 版角色 + 半透明圆角卡片」的卡通风格：
+
+- 整窗是一张 **562×792 的位图**，显示在 Canvas 上，因此卡片圆角、角色遮挡、
+  按钮立体感都与设计稿完全一致
+- 素材由 `tools/build_ui_assets.py` 生成：它把设计稿处理成 `assets/ui/base.png`
+  ——**保留全部原画**（渐变、云、6 个 Q 版角色、卡片、按钮、图标），
+  仅抹除会变的数据（URL、账号行、数值、账单行、按钮文案）
+- 运行时 `ui_render.py` 只把真实数据按实测坐标画上去（坐标见 `assets/ui/layout.json`），
+  所以界面是「静态原画 + 动态数据」的组合
+- 窗口按素材长宽比整体缩放，不拉伸变形；屏幕小于素材尺寸时自动收进工作区并居中
+- 高分屏按系统 DPI 放大渲染
+
+想换配色或布局，改 `tools/build_ui_assets.py` 里的常量后重跑即可重建素材。
+
+> GUI 依赖 **Pillow**（见 `requirements.txt`），tkinter 为 Python 标准库自带。
 
 ---
 
@@ -508,11 +533,17 @@ workbuddy2api/
 ├── cn_importer.py
 ├── ui_admin.py
 ├── app.py
+├── ui_render.py
 ├── ssl_bootstrap.py
 ├── selfcheck.py
 ├── build.bat
 ├── setup.iss
+├── assets/ui/
+│   ├── base.png         界面基底（静态原画）
+│   ├── layout.json      元素坐标与字号
+│   └── icon_*.png       从原画裁出的图标
 ├── tools/
+│   ├── build_ui_assets.py   重建界面素材
 │   └── verify_build.py
 ├── docs/
 │   └── model-capabilities.md
@@ -543,7 +574,9 @@ workbuddy2api/
 - `billing.py`: 上游积分查询与签到
 - `cn_importer.py`: 批量导入国内账号
 - `ui_admin.py`: Web 管理面板的后端路由与内存日志总线
-- `app.py`: Tkinter 桌面启动器（GUI）
+- `app.py`: 桌面启动器（GUI），窗口与交互逻辑
+- `ui_render.py`: 界面渲染——把真实数据按实测坐标画到静态原画上，含按钮与命中区域
+- `tools/build_ui_assets.py`: 从设计稿生成界面素材（保留原画、仅抹除动态数据）
 - `ssl_bootstrap.py`: CA 证书定位兜底（打包漏收证书时的第二道防线）
 - `selfcheck.py`: 打包完整性自检，见「打包 exe 与安装包」
 - `build.bat`: PyInstaller 打包脚本

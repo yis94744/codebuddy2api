@@ -1,0 +1,199 @@
+{
+ "size": [
+  562,
+  792
+ ],
+ "titlebar": {
+  "h": 34,
+  "color": "#35379B"
+ },
+ "status": {
+  "dot": {
+   "cx": 153,
+   "cy": 66,
+   "r": 7,
+   "ring": 2
+  },
+  "title": {
+   "x": 172,
+   "cy": 67,
+   "size": 27,
+   "stroke": 3,
+   "font": "Dengb.ttf"
+  },
+  "sub": {
+   "x": 173,
+   "cy": 97,
+   "size": 10,
+   "stroke": 1,
+   "font": "Deng.ttf"
+  }
+ },
+ "svc": {
+  "label_x": 157,
+  "value_x": 207,
+  "value_size": 12,
+  "addr_cy": 131,
+  "key_cy": 148,
+  "pool_cy": 178,
+  "pool_size": 11,
+  "row0_cy": 201.0,
+  "row_h": 17.5,
+  "rows_max": 9,
+  "size": 10,
+  "col_name": 43,
+  "col_star": 29,
+  "col_check": 147,
+  "col_state": 164,
+  "col_check_ent": 138,
+  "col_state_ent": 152,
+  "col_bal": 226,
+  "col_num": 259,
+  "col_energy": 317,
+  "col_energy_v": 334,
+  "col_buddy": 346,
+  "col_buddy_v": 364,
+  "col_streak": 377,
+  "col_end": 434,
+  "scrollbar_x": 412,
+  "scrollbar_w": 3
+ },
+ "stat": {
+  "req_value": {
+   "cx": 156,
+   "cy": 413,
+   "size": 36
+  },
+  "credit_value": {
+   "cx": 376,
+   "cy": 418,
+   "size": 37
+  }
+ },
+ "bill": {
+  "row0_cy": 484.5,
+  "row_h": 16.6,
+  "rows_max": 11,
+  "size": 11,
+  "id_size": 9,
+  "model_size": 9,
+  "tok_size": 8,
+  "credit_size": 9,
+  "meta_size": 9,
+  "col_time": 36,
+  "col_icon_a": 92,
+  "col_icon_b": 110,
+  "col_icon_c": 92,
+  "col_id": 128,
+  "col_meta": 106,
+  "col_model": 184,
+  "col_tok_label": 296,
+  "col_tokens": 316,
+  "col_credit": 463,
+  "seps": [
+   82.5,
+   284.5,
+   413.5,
+   470.5
+  ],
+  "sep_half": 5,
+  "col_end": 466,
+  "scroll": {
+   "track_x": 528,
+   "track_w": 4,
+   "track_y0": 480,
+   "track_y1": 650,
+   "thumb_x": 524,
+   "thumb_w": 12,
+   "thumb_h": 38,
+   "art_thumb_y0": 606,
+   "art_thumb_y1": 646,
+   "clean_y": 500
+  }
+ },
+ "buttons": [
+  {
+   "key": "stop",
+   "x0": 68,
+   "x1": 173,
+   "y0": 693,
+   "y1": 729,
+   "label": "停止服务"
+  },
+  {
+   "key": "panel",
+   "x0": 176,
+   "x1": 278,
+   "y0": 693,
+   "y1": 729,
+   "label": "管理面板"
+  },
+  {
+   "key": "refresh",
+   "x0": 289,
+   "x1": 390,
+   "y0": 693,
+   "y1": 729,
+   "label": "刷新"
+  },
+  {
+   "key": "copy",
+   "x0": 415,
+   "x1": 521,
+   "y0": 693,
+   "y1": 729,
+   "label": "复制配置"
+  },
+  {
+   "key": "checkin",
+   "x0": 68,
+   "x1": 502,
+   "y0": 752,
+   "y1": 788,
+   "label": "立即签到"
+  }
+ ],
+ "button_text": {
+  "stop": [
+   93,
+   710,
+   12
+  ],
+  "panel": [
+   213,
+   711,
+   12
+  ],
+  "refresh": [
+   338,
+   711,
+   12
+  ],
+  "copy": [
+   443,
+   711,
+   12
+  ],
+  "checkin": [
+   260,
+   762,
+   15
+  ]
+ },
+ "colors": {
+  "ink": "#3B3358",
+  "name": "#4A4A96",
+  "dim": "#7A76A8",
+  "value": "#3A3A80",
+  "blue": "#5D7FD4",
+  "orange": "#EC9204",
+  "green": "#22A05A",
+  "warn": "#E0A031",
+  "red": "#E05462",
+  "model": "#4A4A9E",
+  "title_fill": "#FFFFFF",
+  "title_stroke": "#31337F",
+  "sub_fill": "#FFFFFF",
+  "sub_stroke": "#3A3E80"
+ }
+}

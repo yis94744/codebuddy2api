@@ -271,12 +271,27 @@ class CredentialManager:
 # 模型列表
 # ---------------------------------------------------------------------------
 
+# 模型清单（2026-09 同步自 WorkBuddy 官方 product.json + 后端逐模型实测）。
+#
+# 收录原则：
+#   * 只收「对话类」模型 —— codewise-* / completion-gf / default-1.x /
+#     hunyuan-3b/7b-dense 是补全模型，hunyuan-image-* / kling-* 是图像/视频
+#     生成，走不了 /v2/chat/completions，不收；
+#   * 后端逐模型探测：返回 "model [...] service info not found" 的剔除
+#     （glm-5.0 / glm-4.7 / glm-4.6 / glm-4.6v / kimi-k2-thinking /
+#       minimax-m2.5 / deepseek-v3-1 / deepseek-v3-1-volc / deepseek-r1-0528）。
 DEFAULT_MODELS = [
-    "glm-5.3", "glm-5.3-flash", "glm-5.2", "glm-5.1", "glm-5v-turbo",
-    "kimi-k2.7", "kimi-k2.6", "kimi-k2.5",
-    "deepseek-v4.1-flash", "deepseek-v4-pro", "deepseek-v4-flash",
-    "hunyuan-2.0-instruct",
-    "minimax-m3-pay", "hy3-preview-agent", "auto",
+    # WorkBuddy 当前官方清单（对话类，实测可用）
+    "deepseek-v4-pro", "deepseek-v4-flash", "deepseek-v3-2-volc",
+    "glm-5.2", "glm-5.1", "glm-5.0-turbo", "glm-5v-turbo",
+    "kimi-k3-1", "kimi-k2.7", "kimi-k2.6", "kimi-k2.5",
+    "hunyuan-2.0-instruct", "hunyuan-2.0-thinking", "hunyuan-chat",
+    "minimax-m3", "minimax-m2.7",
+    "hy3", "hy3-preview",
+    # 本机仍注册的旧款（WorkBuddy 清单未列出，后端实测仍可用，向后兼容）
+    "glm-5.3", "glm-5.3-flash", "deepseek-v4.1-flash",
+    "minimax-m3-pay", "hy3-preview-agent",
+    "auto",
 ]
 
 # 后端请求体里出现过的额外字段（透传时若客户端给了就保留）
