@@ -155,6 +155,14 @@ class Renderer:
     # ---- 文字工具 ----
     def _text(self, d, x, y, s, size, color, bold=False, anchor="lm",
               stroke=0, stroke_fill=None, prefer=None):
+        # 兜底：任何字段都强制成字符串。
+        # 上游偶发返回非字符串（实测新版 WorkBuddy 登录态的昵称是加密信封
+        # dict {"$wbEncrypted":1,...}），而 ImageDraw.text 要求 str，否则抛
+        # AttributeError。渲染器是整个界面的单点，一旦这里抛异常，
+        # _redraw 会静默跳过绘制，窗口就停在启动帧——表现为「界面什么都没有」。
+        # 单字段显示难看可以接受，整窗空白不行。
+        if not isinstance(s, str):
+            s = "" if s is None else str(s)
         px = max(8, int(round(size * self.scale)))
         f = load_font(px, bold, prefer)
         d.text((x * self.scale, y * self.scale), s, font=f,
@@ -163,6 +171,8 @@ class Renderer:
                stroke_fill=(rgb(stroke_fill) + (255,)) if stroke_fill else None)
 
     def _text_w(self, s, size, bold=False):
+        if not isinstance(s, str):
+            s = "" if s is None else str(s)
         f = load_font(max(8, int(round(size * self.scale))), bold)
         try:
             b = f.getbbox(s)

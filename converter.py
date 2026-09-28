@@ -162,6 +162,27 @@ def find_auth_file() -> Path | None:
 # Auth 凭据管理（读 + 自动刷新 + 回写）
 # ---------------------------------------------------------------------------
 
+def _readable_name(v) -> Optional[str]:
+    """把 auth 里的名字字段规整成「可显示的字符串或 None」。
+
+    新现象（2026-09 实测）：新版 WorkBuddy 桌面端的登录态把昵称写成了
+    **加密信封**而不是明文——
+
+        "nickname": {"$wbEncrypted": 1, "envelope": "eyJzdWl0ZSI6..."}
+
+    信封里是 {"suite","keyId","nonce","authTag","ciphertext"}，密文只有
+    几个字节，本机没有对应密钥，无法还原成原名。此时必须返回 None，让
+    调用方回退到企业名 / 文件名。
+
+    早期版本直接把该 dict 透传出去，后果是：账号池拿它当名字 → 界面渲染
+    时把 dict 当字符串画 → ImageDraw 抛 AttributeError → 整窗渲染中断，
+    界面上只剩启动时的空帧（表现为「界面什么都没有」）。
+    """
+    if isinstance(v, str):
+        return v.strip() or None
+    return None
+
+
 class CredentialManager:
     """从 auth 文件读取凭据；token 临近过期时自动刷新并回写。"""
 
@@ -260,8 +281,8 @@ class CredentialManager:
         exp = auth.get("expiresAt", 0)
         return {
             "uid": acct.get("uid"),
-            "nickname": acct.get("nickname"),
-            "enterpriseName": acct.get("enterpriseName"),
+            "nickname": _readable_name(acct.get("nickname")),
+            "enterpriseName": _readable_name(acct.get("enterpriseName")),
             "token_expires_at": exp,
             "token_expired": self._is_expired(),
         }
