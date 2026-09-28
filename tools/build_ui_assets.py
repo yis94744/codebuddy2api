@@ -437,6 +437,9 @@ def build(ref_path):
             "addr_cy": 131, "key_cy": 148,
             "pool_cy": 178, "pool_size": 11,
             "row0_cy": ROW0_CY, "row_h": ROW_H, "rows_max": 9, "size": 10,
+            # 账号行的点击热区横向范围（桌面端点整行即可切换当前账号）。
+            # 取账号卡内边，避免压到左右两侧的原画角色。
+            "row_x0": 26, "row_x1": 415,
             "col_name": 43, "col_star": 29,
             "col_check": 147, "col_state": 164,
             # 企业号（We_Game8/9）的状态列实测左移约 9px

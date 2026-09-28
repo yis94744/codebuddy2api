@@ -561,6 +561,38 @@ class Renderer:
     )
 
     # ---- 命中区域（供 app.py 做点击判定）----
+    def account_rects(self, state=None):
+        """账号行的点击热区：点一行即把该账号切为当前使用账号。
+
+        只覆盖**当前可见**的行（考虑 acct_scroll 偏移），返回的 key 形如
+        "acct:<账号 id>"，这样 app.py 不必了解版面细节就能把点击路由回去。
+
+        行的纵向中心与绘制时一致（row0_cy + i*row_h），横向取账号卡内边，
+        这样整行可点，不必精确点到名字上。
+        """
+        out = []
+        if not state:
+            return out
+        cfg = self.layout.get("svc") or {}
+        rows = state.get("accounts") or []
+        cap = cfg.get("rows_max", 9)
+        if not rows:
+            return out
+        x0 = cfg.get("row_x0", 26)
+        x1 = cfg.get("row_x1", 415)
+        rh = cfg.get("row_h", 17.5)
+        off = max(0, min(int(state.get("acct_scroll", 0) or 0),
+                         max(0, len(rows) - cap)))
+        for i, a in enumerate(rows[off:off + cap]):
+            aid = a.get("id")
+            if not aid:
+                continue        # 没有 id 的行不可切换（例如接口降级时的占位）
+            cy = cfg.get("row0_cy", 201.0) + i * rh
+            out.append(("acct:" + str(aid), a.get("name"), x0,
+                        int(round(cy - rh / 2.0)), x1 - x0,
+                        max(8, int(round(rh))), None))
+        return out
+
     def button_rects(self, state=None):
         out = []
         for k, (x0, y0, x1, y1) in self.WIN_BUTTONS:
@@ -568,6 +600,7 @@ class Renderer:
         for b in self.layout["buttons"]:
             out.append((b["key"], b["label"], b["x0"], b["y0"],
                         b["x1"] - b["x0"], b["y1"] - b["y0"], None))
+        out.extend(self.account_rects(state))
         return out
 
     def button_image(self, key, label, w, h, icon=None, hover=False):

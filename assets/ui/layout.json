@@ -41,6 +41,8 @@
   "row_h": 17.5,
   "rows_max": 9,
   "size": 10,
+  "row_x0": 26,
+  "row_x1": 415,
   "col_name": 43,
   "col_star": 29,
   "col_check": 147,

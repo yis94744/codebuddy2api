@@ -16,6 +16,7 @@ import queue
 import sys
 import threading
 import time
+import urllib.parse
 import urllib.request
 import webbrowser
 
@@ -228,6 +229,25 @@ def _get(path, base, key):
         return json.loads(r.read().decode("utf-8", "replace"))
 
 
+def _post(path, base, key, body=None, timeout=15):
+    """向本地网关发一个 POST（带鉴权）。
+
+    账号切换等写操作走这里；超时给足，避免上游抖动时误判失败。
+    """
+    data = json.dumps(body or {}).encode("utf-8")
+    req = urllib.request.Request(
+        base + path, data=data,
+        headers={"Authorization": "Bearer " + key,
+                 "Content-Type": "application/json"},
+        method="POST")
+    with urllib.request.urlopen(req, timeout=timeout) as r:
+        raw = r.read().decode("utf-8", "replace")
+    try:
+        return json.loads(raw)
+    except Exception:
+        return {"raw": raw}
+
+
 class App:
     def __init__(self, root):
         self.root = root
@@ -240,6 +260,9 @@ class App:
         self.stop_evt = threading.Event()
         self._refresh_evt = threading.Event()
         self._refresh_flash_until = 0.0
+        # 闪烁期间要显示的文案；None 表示用默认的「✔ 已刷新 · 时间」。
+        # 账号切换等操作需要自己的提示，否则会被轮询覆盖成「已刷新」。
+        self._flash_text = None
         self.seen = set()
         # 自绘界面状态
         self._resizing = False
@@ -382,11 +405,12 @@ class App:
             return
         self._frame = img.copy()
         self._blit(img)
-        # 按钮热区（物理像素），点击时用同一份版面数据做命中测试
-        self._rects = [(k, x * self._scale, y * self._scale,
+        # 命中热区（物理像素）：底部按钮 + 标题栏三键 + 账号行（点行即切换账号）。
+        # 账号行随 acct_scroll 滚动，因此要把当前状态一并交给渲染器计算。
+        self._rects = [(k, lb, x * self._scale, y * self._scale,
                         bw * self._scale, bh * self._scale)
-                       for (k, _lb, x, y, bw, bh, _ic)
-                       in self._renderer.button_rects()]
+                       for (k, lb, x, y, bw, bh, _ic)
+                       in self._renderer.button_rects(self._state)]
         self._hover_key = None
 
     def _draw_button_labels(self, img):
@@ -431,13 +455,31 @@ class App:
             self.canvas.coords(self._canvas_img, 0, 0)
 
     def _hit(self, px, py):
-        for k, x, y, w, h in self._rects:
+        for k, _lb, x, y, w, h in self._rects:
             if x <= px <= x + w and y <= py <= y + h:
                 return k
         return None
 
+    def _label_of(self, key):
+        """取热区对应的显示名（账号行用它做切换后的提示文案）。"""
+        for k, lb, _x, _y, _w, _h in self._rects:
+            if k == key:
+                return lb
+        return None
+
+    def _active_account_id(self):
+        """当前使用中的账号 id（列表里带 active 标记的那个）。"""
+        for a in (self._state.get("accounts") or []):
+            if a.get("active"):
+                return a.get("id")
+        return None
+
     def _on_click(self, ev):
         k = self._hit(ev.x, ev.y)
+        if isinstance(k, str) and k.startswith("acct:"):
+            # 点击账号行 = 把它切为当前使用账号
+            self._switch_account(k[5:], self._label_of(k))
+            return
         if k == "stop":
             self._on_toggle()
         elif k == "panel":
@@ -637,10 +679,17 @@ class App:
         img = base.copy()
         d = ImageDraw.Draw(img, "RGBA")
         s = self._scale
-        for k, _lb, x, y, bw, bh, _ic in self._renderer.button_rects():
+        for k, _lb, x, y, bw, bh, _ic in self._renderer.button_rects(self._state):
             if k != self._hover_key:
                 continue
-            # 悬停：叠一层白色高光 + 轻微上移的亮边，保持与底图同样的圆角
+            if str(k).startswith("acct:"):
+                # 账号行：整行一条窄高光即可。圆角按行高算（行只有 ~18px 高，
+                # 用按钮那种 11px 圆角会糊成一片）。
+                d.rounded_rectangle([x * s, y * s, (x + bw) * s, (y + bh) * s],
+                                    radius=int(min(6, bh / 2.0) * s),
+                                    fill=(255, 255, 255, 90))
+                continue
+            # 按钮悬停：叠一层白色高光，保持与底图同样的圆角
             d.rounded_rectangle([x * s, y * s, (x + bw) * s, (y + bh) * s],
                                 radius=int(11 * s), fill=(255, 255, 255, 46))
         self._blit(img)
@@ -844,6 +893,7 @@ class App:
         # 不依赖轮询成功与否，否则后端异常时按钮像是没反应。
         stamp = time.strftime("%H:%M:%S")
         self._refresh_flash_until = time.time() + 3.0
+        self._flash_text = None          # 用默认的「已刷新」文案
         # 立刻把文案切到「已刷新」，不要等下一轮轮询，否则按钮像是没反应
         self._set_state(subtitle="✔ 已刷新 · " + stamp)
         self._refresh_evt.set()
@@ -852,6 +902,49 @@ class App:
     def _refresh_done(self):
         # 无论轮询是否成功，按钮文案都要复位，否则会一直停在「刷新中…」
         self._set_state(refresh_label="刷新", redraw=True)
+
+    # -- 账号切换（点账号列表里的任意一行）--------------------------------
+    def _switch_account(self, aid, name=None):
+        """把指定账号切为当前使用账号。
+
+        后台线程发请求，避免网络抖动时卡住界面；成功后立刻拉一轮新数据，
+        让列表里的「主力」标记马上跟过去。
+        """
+        if not aid:
+            return
+        if aid == self._active_account_id():
+            # 点的就是当前账号：给个明确反馈，不要静默无反应
+            self._flash_subtitle("已是当前账号")
+            return
+        self._set_state(subtitle="正在切换账号…")
+        threading.Thread(target=self._switch_worker, args=(aid, name),
+                         daemon=True).start()
+
+    def _switch_worker(self, aid, name):
+        """后台线程：只发请求，结果**通过队列**交回主线程。
+
+        Tk 不是线程安全的：在工作线程里调 root.after / 改控件会抛
+        RuntimeError: main thread is not in main loop（实测踩到过）。
+        因此这里绝不碰界面，一律 self.q.put，由主线程的 _apply 处理
+        ——与既有的 _checkin_worker 保持同一套做法。
+        """
+        ok, err = True, None
+        try:
+            _post("/api/accounts/%s/switch"
+                  % urllib.parse.quote(str(aid), safe=""), self.base, self.key)
+        except Exception as e:
+            ok, err = False, str(e)
+        self.q.put(("switched", (ok, name or str(aid)[:8], err)))
+
+    def _flash_subtitle(self, text):
+        """短暂显示一条自定义提示。
+
+        复用「已刷新」那套闪烁窗口，但把文案换成自己的——否则轮询里的
+        _render_ok 会把它覆盖成「✔ 已刷新 · 时间」，提示等于没出现。
+        """
+        self._refresh_flash_until = time.time() + 3.0
+        self._flash_text = text
+        self._set_state(subtitle=text)
 
     def _copy(self):
         txt = ("Base URL : %s/v1\nAPI Key  : %s\n"
@@ -937,6 +1030,15 @@ class App:
                 self._set_state(checkin_label="立即签到")
             else:
                 self._render_state(item[1])
+        elif kind == "switched":
+            # 账号切换的结果（由后台线程投递，这里在主线程改界面）
+            ok, label, err = item[1]
+            if ok:
+                self._flash_subtitle("✔ 已切换到 %s" % label)
+                # 立刻重取数据，否则「主力」标记要等下一轮轮询（最多 1s）才动
+                self._refresh_evt.set()
+            else:
+                self._flash_subtitle("切换失败：%s" % err)
         elif kind == "addresult":
             import tkinter.messagebox as mb
             self._set_state(checkin_label="立即签到")
@@ -994,9 +1096,9 @@ class App:
             lr = bill.get("last_run") or ""
             if lr:
                 sub += " · 每日签到 %s" % lr
-        # 手动刷新的反馈要压住轮询文案，否则提示会在 1 秒内被覆盖
+        # 操作反馈要压住轮询文案，否则提示会在 1 秒内被覆盖
         if time.time() < self._refresh_flash_until:
-            sub = "✔ 已刷新 · " + time.strftime("%H:%M:%S")
+            sub = self._flash_text or ("✔ 已刷新 · " + time.strftime("%H:%M:%S"))
 
         ps = (accts or {}).get("pool_stats", {}) or {}
         active_id = accts.get("active_id")
@@ -1021,6 +1123,9 @@ class App:
             has_g = bool(g) and not g.get("note")
             hh = a.get("health", "ok")
             accounts.append({
+                # id 必须带上：账号行的点击热区靠它识别「点了哪一个」，
+                # 缺了它 account_rects 会跳过整行，点行就变成没反应。
+                "id": a.get("id"),
                 "name": nm,
                 "health": hh,
                 # 参考图里状态列显示的是「ok」，对勾由图标位承载
